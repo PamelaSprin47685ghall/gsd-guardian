@@ -1,0 +1,16 @@
+{
+  "name": "gsd-guardian",
+  "version": "1.0.0",
+  "description": "Guardian plugin for GSD auto-mode error recovery",
+  "type": "module",
+  "exports": "./index.js",
+  "scripts": {
+    "test": "node --experimental-test-module-mocks --test test/*.test.mjs"
+  },
+  "gsd": {
+    "extension": true
+  },
+  "pi": {
+    "extensions": ["index.js"]
+  }
+}

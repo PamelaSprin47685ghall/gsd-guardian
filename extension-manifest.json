@@ -1,0 +1,13 @@
+{
+  "id": "guardian",
+  "name": "Guardian Auto-Recovery Plugin",
+  "version": "1.0.0",
+  "description": "Enhances auto mode with automatic error recovery, in-place retries with exponential backoff, and seamless LLM-assisted fixes while preserving context.",
+  "tier": "community",
+  "requires": {
+    "platform": ">=2.29.0"
+  },
+  "provides": {
+    "hooks": ["session_start", "before_agent_start", "session_shutdown"]
+  }
+}
