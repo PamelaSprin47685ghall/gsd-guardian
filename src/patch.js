@@ -1,126 +1,96 @@
-// Guardian Plugin - Auto-Loop Patching
+// Guardian Plugin - Runtime Object Patches
 //
-// Implements the frozen auto-loop pattern by monkey-patching resolveAgentEnd.
+// Intercepts mutable JS runtime objects (AutoSession instance, Map, etc.)
+// to enable frozen auto-loop without touching frozen ES module exports.
 
-export function createAutoLoopPatcher(stateManager, pi) {
-    const MAX_RETRIES = 10;
+const MAX_RETRIES = 10;
+let gsdSessionStore = null;
+let gsdAutoApi = null;
 
-    async function patchAutoLoop(gsdAutoLoop, ctx) {
-        const originalResolveAgentEnd = gsdAutoLoop.resolveAgentEnd;
-        stateManager.setOriginalResolveAgentEnd(originalResolveAgentEnd);
+export function setGsdRuntimeModules(mods) {
+    gsdSessionStore = mods?.["auto-runtime-state"] ?? null;
+    gsdAutoApi = mods?.["auto"] ?? null;
+}
 
-        // Hijack GSD's underlying Promise resolver
-        gsdAutoLoop.resolveAgentEnd = async function (event) {
-            const lastMsg = event.messages[event.messages.length - 1];
-            const stopReason = lastMsg?.stopReason;
-            const errorMsg = lastMsg?.errorMessage || "Unknown execution error";
+export function createPatcher(gsd, pi) {
+    let cmdCtxPatched = false;
+    let retryMapPatched = false;
+    let sendMsgPatched = false;
 
-            // Check for tool invocation errors (simplified - we can't access internal state)
-            let toolInvocationError = null;
-
-            // ==========================================
-            // Requirement 5: Respond to user interruption (Esc / Ctrl+C)
-            // ==========================================
-            if (stopReason === "aborted") {
-                stateManager.resetPluginState();
-                // Immediately release, let GSD handle normal termination
-                return originalResolveAgentEnd.call(this, event);
+    // ── Patch 1: Hijack AutoSession.cmdCtx.newSession() ──
+    // Prevents context cleanup during in-place retry.
+    function patchCmdCtx(helper) {
+        const ctx = gsdSessionStore?.autoSession?.cmdCtx;
+        if (!ctx || cmdCtxPatched) return;
+        const orig = ctx.newSession;
+        ctx.newSession = async function (opts) {
+            if (helper.state.isInplaceRetry) {
+                helper.state.isInplaceRetry = false;
+                return { cancelled: false };
             }
-
-            // Determine if hard error occurred: Schema error or GSD tool internal error
-            const isError = stopReason === "error" || toolInvocationError != null;
-            const combinedErrorMsg = toolInvocationError || errorMsg;
-
-            // ==========================================
-            // Requirements 3 & 4: Intercept errors and perform in-place retries (preserve context)
-            // ==========================================
-            if (isError) {
-                if (stateManager.getRetryCount() < MAX_RETRIES) {
-                    const retryNum = stateManager.incrementRetry();
-                    const delayMs = Math.min(1000 * Math.pow(2, retryNum - 1), 30000);
-
-                    pi.sendMessage({
-                        customType: "guardian-notify",
-                        content: `[Guardian] Error detected. In-place retry ${retryNum}/${MAX_RETRIES} in ${delayMs/1000}s...`,
-                        display: true
-                    });
-
-                    try {
-                        await stateManager.safeSleep(delayMs);
-                    } catch (e) {
-                        return; // User pressed Esc during sleep, handled by next aborted event
-                    }
-
-                    // Clean up any state remnants (limited access)
-                    // if (gsdSession) gsdSession.lastToolInvocationError = null;
-
-                    // Core: Use followUp to send, append directly to original context, never trigger newSession!
-                    pi.sendMessage({
-                        customType: "guardian-retry",
-                        content: `Tool or Schema execution failed with error:\n\`\`\`\n${combinedErrorMsg}\n\`\`\`\nPlease carefully correct your parameters and retry the exact same step immediately.`,
-                        display: false
-                    }, { triggerTurn: true, deliverAs: "followUp" });
-
-                    // Intercept ends, absolutely do not call originalResolveAgentEnd, freeze AutoLoop!
-                    return;
-                }
-                // ==========================================
-                // Handling after 10 retries exhausted
-                // ==========================================
-                else {
-                    stateManager.resetRetryCount();
-
-                    // Simplified auto mode detection - assume auto mode for agent_end events
-                    const isAuto = true; // In practice, we'd need better detection
-
-                    if (isAuto) {
-                        // Requirement 1: In auto mode, enter LLM fix mode
-                        stateManager.enterFixingMode();
-                        // if (gsdSession) gsdSession.lastToolInvocationError = null;
-
-                        pi.sendMessage({
-                            customType: "guardian-fix",
-                            content: `**CRITICAL FAILURE**\nWe hit the 10-retry limit. Error:\n\`\`\`\n${combinedErrorMsg}\n\`\`\`\nPlease deeply analyze the workspace and fix any blocking issues (e.g., compile errors, schema issues). Do NOT proceed with the main task yet.`,
-                            display: true
-                        }, { triggerTurn: true, deliverAs: "followUp" });
-
-                        // Continue freezing AutoLoop
-                        return;
-                    } else {
-                        // Requirement 2: In non-auto mode, directly abandon, release to GSD to throw error
-                        return originalResolveAgentEnd.call(this, event);
-                    }
-                }
-            }
-
-            // ==========================================
-            // Successful execution path
-            // ==========================================
-            if (!isError) {
-                if (stateManager.isInFixingMode()) {
-                    // Requirement 1: Fix round successful end, instruct LLM to continue with previously failed task
-                    stateManager.exitFixingMode();
-                    stateManager.resetRetryCount();
-
-                    pi.sendMessage({
-                        customType: "guardian-resume",
-                        content: `Fix completed. Now, please execute the original tool or step that failed earlier to proceed with the task.`,
-                        display: true
-                    }, { triggerTurn: true, deliverAs: "followUp" });
-
-                    // Continue freezing AutoLoop, wait for final tool call success
-                    return;
-                }
-
-                // Completely normal success, reset plugin state, release to GSD's AutoLoop to proceed
-                stateManager.resetPluginState();
-                return originalResolveAgentEnd.call(this, event);
-            }
+            return orig.apply(this, [opts]);
         };
-
-        ctx?.ui?.notify?.("Guardian: Auto-loop patched successfully", "info");
-        return true;
+        cmdCtxPatched = true;
     }
 
-    return { patchAutoLoop };
+    // ── Patch 2: Hijack verificationRetryCount Map ──
+    // Bypasses GSD's 3-retry limit by lying about the count.
+    function patchRetryMap(helper) {
+        const map = gsdSessionStore?.autoSession?.verificationRetryCount;
+        if (!map || retryMapPatched) return;
+        const origSet = map.set.bind(map);
+        const origDelete = map.delete.bind(map);
+
+        map.set = function (key, val) {
+            helper.state.retryCount++;
+            if (helper.state.retryCount <= MAX_RETRIES) {
+                helper.state.isInplaceRetry = true;
+                helper.state.needsSleep = true;
+                return origSet(key, 1);
+            }
+            // 10 retries exhausted → enter fix mode
+            helper.state.isFixingMode = true;
+            setTimeout(() => {
+                pi.sendMessage({
+                    customType: "gsd-guardian-fix",
+                    content: "**CRITICAL FAILURE**\n10 consecutive failures occurred. Auto Mode is paused.\n\nPlease deeply analyze the workspace, fix any logical, compilation, or schema errors. I will automatically resume Auto Mode after this turn.",
+                    display: true
+                }, { triggerTurn: true });
+            }, 1000);
+            return origSet(key, 4);
+        };
+
+        map.delete = function (key) {
+            helper.state.retryCount = 0;
+            return origDelete(key);
+        };
+        retryMapPatched = true;
+    }
+
+    // ── Patch 3: Hijack pi.sendMessage ──
+    // Injects exponential backoff sleep before message delivery.
+    function patchSendMessage(helper) {
+        if (sendMsgPatched) return;
+        const orig = pi.sendMessage.bind(pi);
+        pi.sendMessage = function (msg, opts) {
+            if (helper.state.needsSleep) {
+                helper.state.needsSleep = false;
+                const delayMs = Math.min(1000 * Math.pow(2, helper.state.retryCount - 1), 30000);
+                helper.safeSleep(delayMs).then(() => {
+                    orig(msg, opts);
+                }).catch(() => {});
+                return;
+            }
+            return orig(msg, opts);
+        };
+        sendMsgPatched = true;
+    }
+
+    function applyAll(helper) {
+        patchCmdCtx(helper);
+        patchRetryMap(helper);
+        patchSendMessage(helper);
+    }
+
+    return { applyAll };
 }

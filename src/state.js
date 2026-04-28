@@ -1,16 +1,16 @@
-// Guardian Plugin - State Management
+// Guardian Plugin - State Machine
 //
-// Manages plugin state machine for retries and error recovery.
+// Manages retry count, fixing mode, and sleep interruption state.
 
-export function createStateManager() {
+export function createGuardianState() {
     const state = {
         retryCount: 0,
         isFixingMode: false,
-        cancelSleep: null,
-        originalResolveAgentEnd: null
+        isInplaceRetry: false,
+        needsSleep: false,
+        cancelSleep: null
     };
 
-    // Safe sleep with interruption support
     async function safeSleep(ms) {
         return new Promise((resolve, reject) => {
             const timer = setTimeout(() => {
@@ -20,59 +20,26 @@ export function createStateManager() {
             state.cancelSleep = () => {
                 clearTimeout(timer);
                 state.cancelSleep = null;
-                reject(new Error("aborted"));
+                reject(new Error("User Aborted"));
             };
         });
     }
 
-    function resetPluginState() {
+    function reset() {
         state.retryCount = 0;
         state.isFixingMode = false;
+        state.isInplaceRetry = false;
+        state.needsSleep = false;
         if (state.cancelSleep) state.cancelSleep();
     }
 
-    function incrementRetry() {
-        return ++state.retryCount;
-    }
-
-    function getRetryCount() {
-        return state.retryCount;
-    }
-
-    function resetRetryCount() {
-        state.retryCount = 0;
-    }
-
-    function enterFixingMode() {
-        state.isFixingMode = true;
-    }
-
-    function exitFixingMode() {
-        state.isFixingMode = false;
-    }
-
-    function isInFixingMode() {
-        return state.isFixingMode;
-    }
-
-    function setOriginalResolveAgentEnd(fn) {
-        state.originalResolveAgentEnd = fn;
-    }
-
-    function getOriginalResolveAgentEnd() {
-        return state.originalResolveAgentEnd;
-    }
+    function getRetryCount() { return state.retryCount; }
+    function isFixing() { return state.isFixingMode; }
+    function isRetrying() { return state.isInplaceRetry; }
+    function isSleeping() { return state.needsSleep; }
 
     return {
-        safeSleep,
-        resetPluginState,
-        incrementRetry,
-        getRetryCount,
-        resetRetryCount,
-        enterFixingMode,
-        exitFixingMode,
-        isInFixingMode,
-        setOriginalResolveAgentEnd,
-        getOriginalResolveAgentEnd
+        state, safeSleep, reset,
+        getRetryCount, isFixing, isRetrying, isSleeping
     };
 }

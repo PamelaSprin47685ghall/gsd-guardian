@@ -1,47 +1,41 @@
-// Guardian Plugin - Module Discovery
+// Guardian Plugin - GSD Runtime Module Discovery
 //
-// Dynamically locates and loads GSD's internal auto-loop module.
+// Dynamically locates and loads GSD's runtime state and API modules.
+// Needed to access AutoSession instance for method interception.
 
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 
-export async function loadGsdAutoLoop(ctx) {
+function gsdModuleDir() {
     const candidates = [];
-
     try {
         const req = createRequire(import.meta.url);
         const pkgPath = req.resolve("@gsd/pi-coding-agent/package.json");
         candidates.push(path.join(path.dirname(pkgPath), "dist", "resources", "extensions", "gsd"));
-        candidates.push(path.join(path.dirname(pkgPath), "src", "resources", "extensions", "gsd"));
     } catch {}
-
-    if (process.env.GSD_CODING_AGENT_DIR) {
-        candidates.push(path.join(process.env.GSD_CODING_AGENT_DIR, "dist", "resources", "extensions", "gsd"));
-        candidates.push(path.join(process.env.GSD_CODING_AGENT_DIR, "src", "resources", "extensions", "gsd"));
-    }
-
-    if (process.env.GSD_PKG_ROOT) {
-        candidates.push(path.join(process.env.GSD_PKG_ROOT, "dist", "resources", "extensions", "gsd"));
-        candidates.push(path.join(process.env.GSD_PKG_ROOT, "src", "resources", "extensions", "gsd"));
-    }
-
-    for (const dir of candidates) {
-        try {
-            if (!fs.existsSync(dir)) continue;
-
-            // Try to load auto-loop module
-            const autoLoopPath = path.join(dir, "auto-loop.js");
-            if (fs.existsSync(autoLoopPath)) {
-                const mod = await import(pathToFileURL(autoLoopPath).href);
-                return mod;
-            }
-        } catch (e) {
-            continue;
+    for (const env of ["GSD_CODING_AGENT_DIR", "GSD_PKG_ROOT"]) {
+        const dir = process.env[env];
+        if (dir) {
+            candidates.push(path.join(dir, "dist", "resources", "extensions", "gsd"));
         }
     }
+    return candidates;
+}
 
-    ctx?.ui?.notify?.("Guardian: Could not locate GSD auto-loop module", "error");
+export async function loadGsdModules(ctx) {
+    for (const dir of gsdModuleDir()) {
+        try {
+            if (!fs.existsSync(dir)) continue;
+            const mods = {};
+            for (const name of ["auto-runtime-state", "auto"]) {
+                const p = path.join(dir, `${name}.js`);
+                if (fs.existsSync(p)) mods[name] = await import(pathToFileURL(p).href);
+            }
+            if (mods["auto-runtime-state"] || mods["auto"]) return mods;
+        } catch {}
+    }
+    ctx?.ui?.notify?.("Guardian: Could not locate GSD runtime modules", "error");
     return null;
 }
