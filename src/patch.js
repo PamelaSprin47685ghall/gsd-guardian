@@ -14,7 +14,6 @@ export function createPatcher(pi) {
     let cmdCtxPatched = false;
     let retryMapPatched = false;
     let sendMsgPatched = false;
-    let emitPatched = false;
     let currentCtx = null; // cached for UI notifications
 
     // ── Patch 1: Hijack AutoSession.cmdCtx.newSession() ──
@@ -92,41 +91,11 @@ export function createPatcher(pi) {
         sendMsgPatched = true;
     }
 
-    // ── Patch 4: Hijack pi.emit (ultimate defense) ──
-    // Intercepts agent_end events before any listener sees them, eliminating
-    // the race condition between Guardian's and GSD's handler registration order.
-    function patchEmit() {
-        if (emitPatched) return;
-        const origEmit = pi.emit.bind(pi);
-        pi.emit = function (eventName, ...args) {
-            if (eventName === "agent_end") {
-                const event = args[0];
-                const lastMsg = event?.messages?.[event.messages.length - 1];
-                if (lastMsg?.stopReason === "error") {
-                    const isAuto = gsdSessionStore?.autoSession?.active || false;
-                    lastMsg.stopReason = "stop"; // Hide from all listeners
-
-                    if (isAuto) {
-                        if (gsdSessionStore?.autoSession) {
-                            gsdSessionStore.autoSession.lastToolInvocationError = null;
-                        }
-                    } else {
-                        // Tag for manual mode retry in guardian.js
-                        event.__guardian_manual_error = lastMsg.errorMessage || "Unknown execution error";
-                    }
-                }
-            }
-            return origEmit(eventName, ...args);
-        };
-        emitPatched = true;
-    }
-
     function applyAll(helper, ctx) {
         if (ctx) currentCtx = ctx;
         patchCmdCtx(helper);
         patchRetryMap(helper);
         patchSendMessage(helper);
-        patchEmit();
     }
 
     return { applyAll };
