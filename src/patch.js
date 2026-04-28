@@ -5,17 +5,17 @@
 
 const MAX_RETRIES = 10;
 let gsdSessionStore = null;
-let gsdAutoApi = null;
 
 export function setGsdRuntimeModules(mods) {
     gsdSessionStore = mods?.["auto-runtime-state"] ?? null;
-    gsdAutoApi = mods?.["auto"] ?? null;
 }
 
-export function createPatcher(gsd, pi) {
+export function createPatcher(pi) {
     let cmdCtxPatched = false;
     let retryMapPatched = false;
     let sendMsgPatched = false;
+    let emitPatched = false;
+    let currentCtx = null; // cached for UI notifications
 
     // ── Patch 1: Hijack AutoSession.cmdCtx.newSession() ──
     // Prevents context cleanup during in-place retry.
@@ -53,10 +53,10 @@ export function createPatcher(gsd, pi) {
             setTimeout(() => {
                 pi.sendMessage({
                     customType: "gsd-guardian-fix",
-                    content: "**CRITICAL FAILURE**\n10 consecutive failures occurred. Auto Mode is paused.\n\nPlease deeply analyze the workspace, fix any logical, compilation, or schema errors. I will automatically resume Auto Mode after this turn.",
+                    content: "**CRITICAL FAILURE**\n10 consecutive failures occurred. Auto Mode is paused.\n\nPlease deeply analyze the workspace, fix any logical, compilation, or schema errors. Do NOT try to proceed with the main task yet, just fix the blockers. I will automatically resume Auto Mode after this turn.",
                     display: true
-                }, { triggerTurn: true });
-            }, 1000);
+                }, { triggerTurn: true, deliverAs: "followUp" });
+            }, 1500);
             return origSet(key, 4);
         };
 
@@ -76,6 +76,12 @@ export function createPatcher(gsd, pi) {
             if (helper.state.needsSleep) {
                 helper.state.needsSleep = false;
                 const delayMs = Math.min(1000 * Math.pow(2, helper.state.retryCount - 1), 30000);
+
+                currentCtx?.ui?.notify?.(
+                    `[Guardian] Auto Mode in-place retry ${helper.state.retryCount}/${MAX_RETRIES} in ${delayMs / 1000}s...`,
+                    "warning"
+                );
+
                 helper.safeSleep(delayMs).then(() => {
                     orig(msg, opts);
                 }).catch(() => {});
@@ -86,10 +92,41 @@ export function createPatcher(gsd, pi) {
         sendMsgPatched = true;
     }
 
-    function applyAll(helper) {
+    // ── Patch 4: Hijack pi.emit (ultimate defense) ──
+    // Intercepts agent_end events before any listener sees them, eliminating
+    // the race condition between Guardian's and GSD's handler registration order.
+    function patchEmit() {
+        if (emitPatched) return;
+        const origEmit = pi.emit.bind(pi);
+        pi.emit = function (eventName, ...args) {
+            if (eventName === "agent_end") {
+                const event = args[0];
+                const lastMsg = event?.messages?.[event.messages.length - 1];
+                if (lastMsg?.stopReason === "error") {
+                    const isAuto = gsdSessionStore?.autoSession?.active || false;
+                    lastMsg.stopReason = "stop"; // Hide from all listeners
+
+                    if (isAuto) {
+                        if (gsdSessionStore?.autoSession) {
+                            gsdSessionStore.autoSession.lastToolInvocationError = null;
+                        }
+                    } else {
+                        // Tag for manual mode retry in guardian.js
+                        event.__guardian_manual_error = lastMsg.errorMessage || "Unknown execution error";
+                    }
+                }
+            }
+            return origEmit(eventName, ...args);
+        };
+        emitPatched = true;
+    }
+
+    function applyAll(helper, ctx) {
+        if (ctx) currentCtx = ctx;
         patchCmdCtx(helper);
         patchRetryMap(helper);
         patchSendMessage(helper);
+        patchEmit();
     }
 
     return { applyAll };
