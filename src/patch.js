@@ -1,7 +1,4 @@
 // Guardian Plugin - Runtime Object Patches
-//
-// Intercepts mutable JS runtime objects (AutoSession instance, Map, etc.)
-// to enable frozen auto-loop without touching frozen ES module exports.
 
 const MAX_RETRIES = 10;
 let gsdSessionStore = null;
@@ -14,10 +11,10 @@ export function createPatcher(pi) {
     let cmdCtxPatched = false;
     let retryMapPatched = false;
     let sendMsgPatched = false;
-    let currentCtx = null; // cached for UI notifications
+    let emitPatched = false;
+    let currentCtx = null; 
 
     // ── Patch 1: Hijack AutoSession.cmdCtx.newSession() ──
-    // Prevents context cleanup during in-place retry.
     function patchCmdCtx(helper) {
         const ctx = gsdSessionStore?.autoSession?.cmdCtx;
         if (!ctx || cmdCtxPatched) return;
@@ -33,7 +30,6 @@ export function createPatcher(pi) {
     }
 
     // ── Patch 2: Hijack verificationRetryCount Map ──
-    // Bypasses GSD's 3-retry limit by lying about the count.
     function patchRetryMap(helper) {
         const map = gsdSessionStore?.autoSession?.verificationRetryCount;
         if (!map || retryMapPatched) return;
@@ -47,7 +43,6 @@ export function createPatcher(pi) {
                 helper.state.needsSleep = true;
                 return origSet(key, 1);
             }
-            // 10 retries exhausted → enter fix mode
             helper.state.isFixingMode = true;
             setTimeout(() => {
                 pi.sendMessage({
@@ -67,7 +62,6 @@ export function createPatcher(pi) {
     }
 
     // ── Patch 3: Hijack pi.sendMessage ──
-    // Injects exponential backoff sleep before message delivery.
     function patchSendMessage(helper) {
         if (sendMsgPatched) return;
         const orig = pi.sendMessage.bind(pi);
@@ -91,11 +85,39 @@ export function createPatcher(pi) {
         sendMsgPatched = true;
     }
 
+    // ── Patch 4: Hijack pi.emit ──
+    function patchEmit() {
+        if (emitPatched) return;
+        const origEmit = pi.emit.bind(pi);
+        pi.emit = function (eventName, ...args) {
+            if (eventName === "agent_end") {
+                const event = args[0];
+                const lastMsg = event?.messages?.[event.messages.length - 1];
+                if (lastMsg?.stopReason === "error") {
+                    // 双保险：检查实例状态 或 独有的环境变量
+                    const isAuto = gsdSessionStore?.autoSession?.active || !!process.env.GSD_PROJECT_ROOT;
+                    lastMsg.stopReason = "stop"; 
+
+                    if (isAuto) {
+                        if (gsdSessionStore?.autoSession) {
+                            gsdSessionStore.autoSession.lastToolInvocationError = null;
+                        }
+                    } else {
+                        event.__guardian_manual_error = lastMsg.errorMessage || "Unknown execution error";
+                    }
+                }
+            }
+            return origEmit(eventName, ...args);
+        };
+        emitPatched = true;
+    }
+
     function applyAll(helper, ctx) {
         if (ctx) currentCtx = ctx;
         patchCmdCtx(helper);
         patchRetryMap(helper);
         patchSendMessage(helper);
+        patchEmit();
     }
 
     return { applyAll };

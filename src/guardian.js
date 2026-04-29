@@ -1,8 +1,4 @@
-// Guardian Plugin Main - Runtime Object Hijacking
-//
-// Key design: Listens to the earlier "turn_end" event to mutate the message
-// object by reference. This blinds GSD's core agent_end listener to schema
-// errors, funneling the execution into the retry/fix Map interceptors.
+// Guardian Plugin Main
 
 import { loadGsdModules } from "./discovery.js";
 import { setGsdRuntimeModules, createPatcher } from "./patch.js";
@@ -32,23 +28,6 @@ export default function guardianPlugin(pi) {
         patcher.applyAll(helper, ctx);
     });
 
-    // ── 终极防御：在 agent_end 之前拦截并篡改对象引用 ──
-    pi.on("turn_end", async (event, ctx) => {
-        await ensureMods(ctx);
-        const msg = event.message;
-
-        if (msg && msg.stopReason === "error") {
-            const isAuto = gsdMods?.["auto"]?.isAutoActive() || false;
-            msg.__guardian_manual_error = msg.errorMessage || "Unknown execution error";
-            msg.stopReason = "stop";
-
-            if (isAuto) {
-                const session = gsdMods?.["auto-runtime-state"]?.autoSession;
-                if (session) session.lastToolInvocationError = null;
-            }
-        }
-    });
-
     pi.on("agent_end", async (event, ctx) => {
         await ensureMods(ctx);
         patcher.applyAll(helper, ctx);
@@ -56,19 +35,18 @@ export default function guardianPlugin(pi) {
         const lastMsg = event.messages?.[event.messages.length - 1];
         const stopReason = lastMsg?.stopReason;
 
-        // User interrupt — full reset
         if (stopReason === "aborted") {
             helper.reset();
             return;
         }
 
-        const isAuto = gsdMods?.["auto"]?.isAutoActive() || false;
+        // 双保险
+        const isAuto = gsdMods?.["auto"]?.isAutoActive() || !!process.env.GSD_PROJECT_ROOT;
 
-        // Fix mode: LLM completed a repair round
         if (helper.state.isFixingMode) {
             helper.state.isFixingMode = false;
             helper.state.retryCount = 0;
-            if (stopReason === "error" || lastMsg?.__guardian_manual_error) {
+            if (stopReason === "error") {
                 ctx?.ui?.notify?.("Guardian: LLM self-repair failed", "error");
                 return;
             }
@@ -80,8 +58,7 @@ export default function guardianPlugin(pi) {
             return;
         }
 
-        // Manual mode error handling
-        if (lastMsg && lastMsg.__guardian_manual_error && !isAuto) {
+        if (event.__guardian_manual_error && !isAuto) {
             helper.state.retryCount++;
             if (helper.state.retryCount <= MAX_RETRIES) {
                 const delayMs = Math.min(1000 * Math.pow(2, helper.state.retryCount - 1), 30000);
@@ -90,7 +67,7 @@ export default function guardianPlugin(pi) {
                     await helper.safeSleep(delayMs);
                     pi.sendMessage({
                         customType: "gsd-guardian-retry",
-                        content: `Execution error: ${lastMsg.__guardian_manual_error}\n\nPlease correct your parameters and try exactly the same step again.`,
+                        content: `Execution error: ${event.__guardian_manual_error}\n\nPlease correct your parameters and try exactly the same step again.`,
                         display: false
                     }, { triggerTurn: true, deliverAs: "followUp" });
                 } catch (e) {}
@@ -98,8 +75,7 @@ export default function guardianPlugin(pi) {
                 helper.state.retryCount = 0;
                 ctx?.ui?.notify?.("[Guardian] 10 retries exhausted. Giving up in manual mode.", "error");
             }
-        } else if (!isAuto && !lastMsg?.__guardian_manual_error) {
-            // Normal mode successful end — reset counter
+        } else if (!isAuto) {
             helper.reset();
         }
     });
