@@ -9,13 +9,10 @@ export function setGsdRuntimeModules(mods) {
 
 export function createPatcher(pi) {
     let cmdCtxPatched = false;
-    let retryMapPatched = false;
-    let sendMsgPatched = false;
     let uiPatched = false;
-    let toolErrorPatched = false;
     let currentCtx = null;
 
-    // ── Patch 1: 拦截 newSession (服务于 Track 1 原地重试) ──
+    // ── Patch 1: 拦截 newSession (防止上下文清理) ──
     function patchCmdCtx(helper) {
         const sessionStore = gsdModsStore?.["auto-runtime-state"];
         const ctx = sessionStore?.autoSession?.cmdCtx;
@@ -24,65 +21,14 @@ export function createPatcher(pi) {
         ctx.newSession = async function (opts) {
             if (helper.state.isInplaceRetry) {
                 helper.state.isInplaceRetry = false;
-                return { cancelled: false }; // 原地重试，拦截上下文清理
+                return { cancelled: false }; 
             }
             return orig.apply(this, [opts]);
         };
         cmdCtxPatched = true;
     }
 
-    // ── Patch 2: 拦截重试计数器 (服务于 Track 1 原地重试) ──
-    function patchRetryMap(helper) {
-        const sessionStore = gsdModsStore?.["auto-runtime-state"];
-        const map = sessionStore?.autoSession?.verificationRetryCount;
-        if (!map || retryMapPatched) return;
-        const origSet = map.set.bind(map);
-        const origDelete = map.delete.bind(map);
-
-        map.set = function (key, val) {
-            helper.state.schemaRetryCount++;
-            if (helper.state.schemaRetryCount <= MAX_RETRIES) {
-                helper.state.isInplaceRetry = true;
-                helper.state.needsSleep = true;
-                return origSet(key, 1); // 永远欺骗 GSD 是第 1 次
-            }
-            helper.state.schemaRetryCount = 0;
-            helper.state.needsSchemaRetry = false;
-            return origSet(key, val); 
-        };
-
-        map.delete = function (key) {
-            helper.state.schemaRetryCount = 0;
-            return origDelete(key);
-        };
-        retryMapPatched = true;
-    }
-
-    // ── Patch 3: 终极杀招 - 属性黑洞 (吃掉所有工具报错) ──
-    function patchToolError() {
-        const sessionStore = gsdModsStore?.["auto-runtime-state"];
-        const s = sessionStore?.autoSession;
-        if (!s || toolErrorPatched) return;
-
-        let realError = s.lastToolInvocationError;
-        Object.defineProperty(s, "lastToolInvocationError", {
-            get: function () {
-                if (this.active) return null; // Auto Mode 下永远是瞎子
-                return realError;
-            },
-            set: function (val) {
-                if (this.active) {
-                    realError = null; // 拒绝任何写入
-                } else {
-                    realError = val;
-                }
-            },
-            configurable: true
-        });
-        toolErrorPatched = true;
-    }
-
-    // ── Patch 4: 全局业务错误探针 (服务于 Track 2 刷新重试) ──
+    // ── Patch 2: 拦截 UI 打印 (全能业务探针) ──
     function patchUI(helper) {
         if (!currentCtx || uiPatched) return;
         if (!currentCtx.ui.__guardian_patched) {
@@ -92,7 +38,7 @@ export function createPatcher(pi) {
             
             currentCtx.ui.notify = function(msg, level) {
                 if (typeof msg === "string" && !msg.includes("[Guardian]")) {
-                    // 1. 抓取红/黄字报错
+                    
                     if (level === "error" || level === "warning") {
                         if (Date.now() - errorTime < 1000) {
                             lastErrorStr += "\n" + msg;
@@ -102,16 +48,13 @@ export function createPatcher(pi) {
                         errorTime = Date.now();
                     }
 
-                    // 2. 捕捉到停机指令
                     if (msg.includes("mode paused") && msg.includes("to resume")) {
-                        // 停机前 3 秒内发生过报错，判定为业务死机
                         if (Date.now() - errorTime < 3000) {
                             helper.state.businessRetryCount++;
                             if (helper.state.businessRetryCount <= MAX_RETRIES) {
                                 origNotify(`[Guardian] Business issue detected. Restarting pipeline (${helper.state.businessRetryCount}/${MAX_RETRIES})...`, "warning");
                                 helper.state.pendingBusinessError = lastErrorStr;
                                 
-                                // 1.5 秒后，强行拉起全新 Auto Loop
                                 setTimeout(() => {
                                     const api = gsdModsStore?.["auto"];
                                     if (api) {
@@ -141,20 +84,20 @@ export function createPatcher(pi) {
         }
     }
 
-    // ── Patch 5: 拦截消息发送 (分发两路弹药) ──
+    // ── Patch 3: 拦截消息发送 (注入报错) ──
     function patchSendMessage(helper) {
-        if (sendMsgPatched) return;
+        if (pi.__guardian_send_patched) return;
         const origSend = pi.sendMessage.bind(pi);
         pi.sendMessage = function (msg, opts) {
             
-            // Track 2: 业务错误注入 (非原地重试，上下文已刷新)
+            // 业务错误注入 (非原地重试，上下文已刷新)
             if (helper.state.pendingBusinessError) {
                 msg.content = `${msg.content}\n\n**PREVIOUS ATTEMPT FAILED**\nThe system rejected your previous output:\n\`\`\`\n${helper.state.pendingBusinessError}\n\`\`\`\nPlease fix this issue.`;
                 helper.state.pendingBusinessError = null;
                 return origSend(msg, opts);
             }
 
-            // Track 1: Schema 原地重试 (上下文保留)
+            // Schema 原地重试 
             if (helper.state.needsSleep) {
                 helper.state.needsSleep = false;
                 const delayMs = Math.min(1000 * Math.pow(2, helper.state.schemaRetryCount - 1), 30000);
@@ -163,7 +106,7 @@ export function createPatcher(pi) {
                 if (helper.state.schemaErrorMsg) {
                     msg = {
                         customType: "gsd-guardian-retry",
-                        content: `**EXECUTION ERROR**\nThe tool failed with:\n\`\`\`\n${helper.state.schemaErrorMsg}\n\`\`\`\nPlease correct your parameters and retry exactly the same step.`,
+                        content: `**EXECUTION ERROR**\nThe tool failed with:\n\`\`\`\n${helper.state.schemaErrorMsg}\n\`\`\`\nPlease carefully correct your parameters and retry exactly the same step.`,
                         display: false
                     };
                     helper.state.schemaErrorMsg = null;
@@ -177,16 +120,21 @@ export function createPatcher(pi) {
 
             return origSend(msg, opts);
         };
-        sendMsgPatched = true;
+        pi.__guardian_send_patched = true;
     }
 
     function applyAll(helper, ctx) {
         if (ctx) currentCtx = ctx;
         patchCmdCtx(helper);
-        patchRetryMap(helper);
-        patchToolError(); // 启动属性黑洞
         patchUI(helper);
         patchSendMessage(helper);
+        
+        // 终极清洗：每次调用 applyAll 时，暴力清空 lastToolInvocationError
+        // 这样无论 GSD 在哪里重置了 AutoSession，我们都能及时干掉它
+        const sessionStore = gsdModsStore?.["auto-runtime-state"];
+        if (sessionStore?.autoSession) {
+            sessionStore.autoSession.lastToolInvocationError = null;
+        }
     }
 
     return { applyAll };

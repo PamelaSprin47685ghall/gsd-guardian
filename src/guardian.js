@@ -28,22 +28,50 @@ export default function guardianPlugin(pi) {
         patcher.applyAll(state, ctx);
     });
 
-    // ── 核心防御：无条件隐瞒 Schema 错误，逼迫 GSD 走产物校验 ──
+    // ── 防御第一层：在工具返回结果时，抢先接管 Schema 错误 ──
+    pi.on("tool_result", (event) => {
+        if (event.isError) {
+            const isAuto = gsdMods?.["auto"]?.isAutoActive() || !!process.env.GSD_PROJECT_ROOT;
+            if (isAuto) {
+                // 如果在 Auto 模式下发生了工具错误，直接把错误塞给状态机，
+                // 然后强行把它标记为非错误！阻止它写入 `lastToolInvocationError`！
+                state.schemaErrorMsg = event.content?.[0]?.text || "Unknown Validation Error";
+                event.isError = false; 
+                event.content = [{ type: "text", text: "Error intercepted by Guardian." }];
+            }
+        }
+    });
+
+    // ── 防御第二层：如果在回合结束时发现 Schema 错误，直接触发我们自己的重试 ──
     pi.on("turn_end", (event) => {
         const msg = event.message;
-        if (msg && msg.stopReason === "error") {
-            const isAuto = gsdMods?.["auto"]?.isAutoActive() || !!process.env.GSD_PROJECT_ROOT;
-            
-            // 【无条件执行】只要报错，必须把错误抹掉，防止 GSD 核心崩溃！
-            msg.stopReason = "stop";
+        const isAuto = gsdMods?.["auto"]?.isAutoActive() || !!process.env.GSD_PROJECT_ROOT;
+        
+        // 清理残局
+        if (isAuto) {
+            const session = gsdMods?.["auto-runtime-state"]?.autoSession;
+            if (session) session.lastToolInvocationError = null;
+        }
 
+        // 如果我们拦截到了 Schema 错误，直接触发原地重试，不让流程走到底层的 3 次崩溃
+        if (state.schemaErrorMsg && isAuto) {
+            state.schemaRetryCount++;
+            if (state.schemaRetryCount <= MAX_RETRIES) {
+                state.needsSleep = true;
+                state.isInplaceRetry = true;
+                
+                // 伪造一个触发信号，让 patchSendMessage 开始走 followUp 重试
+                pi.sendMessage({ customType: "trigger" }, { triggerTurn: true });
+            } else {
+                state.schemaRetryCount = 0;
+                // 可以接入修复模式逻辑
+            }
+            return;
+        }
+
+        if (msg && msg.stopReason === "error") {
             if (isAuto) {
-                // 缓存真实错误供 FollowUp 使用
-                state.schemaErrorMsg = msg.errorMessage || "Unknown Error";
-                const sessionStore = gsdMods?.["auto-runtime-state"];
-                if (sessionStore?.autoSession) {
-                    sessionStore.autoSession.lastToolInvocationError = null;
-                }
+                msg.stopReason = "stop";
             } else {
                 event.__manual_error = msg.errorMessage || "Unknown Error";
             }
@@ -62,7 +90,7 @@ export default function guardianPlugin(pi) {
 
         const isAuto = gsdMods?.["auto"]?.isAutoActive() || !!process.env.GSD_PROJECT_ROOT;
 
-        // ── Manual Mode 处理 ──
+        // Manual Mode 处理
         if (event.__manual_error && !isAuto) {
             state.schemaRetryCount++;
             if (state.schemaRetryCount <= MAX_RETRIES) {
