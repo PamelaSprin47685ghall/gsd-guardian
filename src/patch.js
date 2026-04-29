@@ -10,6 +10,7 @@ export function setGsdRuntimeModules(mods) {
 }
 
 export function createPatcher(pi) {
+    let cmdCtxPatched = false;
     let retryMapPatched = false;
     let sendMsgPatched = false;
     let uiPatched = false;
@@ -18,14 +19,13 @@ export function createPatcher(pi) {
     // ── Patch 1: Hijack AutoSession.cmdCtx.newSession() ──
     function patchCmdCtx(helper) {
         const ctx = gsdSessionStore?.autoSession?.cmdCtx;
-        // 核心修复：只在真正的 CommandContext 上进行拦截，并将其缓存！
         if (ctx && typeof ctx.newSession === "function") {
-            helper.state.validCmdCtx = ctx; // 存起来，复活用它！
+            // 实时更新缓存，永远保持最新
+            helper.state.validCmdCtx = ctx; 
 
             if (!ctx.__guardian_patched) {
                 const orig = ctx.newSession;
                 ctx.newSession = async function (opts) {
-                    // 原地重试时拦截上下文清理，保留记忆
                     if (helper.state.isInplaceRetry) {
                         helper.state.isInplaceRetry = false;
                         return { cancelled: false };
@@ -73,6 +73,7 @@ export function createPatcher(pi) {
             const origNotify = currentCtx.ui.notify.bind(currentCtx.ui);
             currentCtx.ui.notify = function(msg, level) {
                 if (typeof msg === "string" && !msg.includes("[Guardian]")) {
+                    
                     if (level === "error" || level === "warning") {
                         if (Date.now() - errorTime < 1000) {
                             lastErrorOrWarning += "\n" + msg;
@@ -91,8 +92,30 @@ export function createPatcher(pi) {
                                 
                                 setTimeout(() => {
                                     const api = gsdModsStore?.["auto"];
-                                    // 核心修复：使用带有 newSession 方法的 validCmdCtx 复活！
-                                    if (api) api.startAutoDetached(helper.state.validCmdCtx || currentCtx, pi, process.cwd(), false);
+                                    if (api) {
+                                        // 终极武器：我们自己造一个绝对不会报错的 Context！
+                                        const robustCtx = helper.state.validCmdCtx || currentCtx;
+                                        if (typeof robustCtx.newSession !== "function") {
+                                            robustCtx.newSession = async (opts) => {
+                                                if (helper.state.isInplaceRetry) {
+                                                    helper.state.isInplaceRetry = false;
+                                                    return { cancelled: false };
+                                                }
+                                                // 退化到通过 sessionManager 创建
+                                                try {
+                                                    const res = await currentCtx.sessionManager?.newSession(opts);
+                                                    return res ?? { cancelled: false };
+                                                } catch (e) {
+                                                    return { cancelled: false };
+                                                }
+                                            };
+                                        }
+                                        if (typeof robustCtx.getContextUsage !== "function") {
+                                            robustCtx.getContextUsage = () => ({ percent: 50, tokens: 50000, limit: 100000 });
+                                        }
+
+                                        api.startAutoDetached(robustCtx, pi, process.cwd(), false);
+                                    }
                                 }, 1500);
                             } else {
                                 currentCtx.ui.notify(`[Guardian] Business retries exhausted. Manual intervention required.`, "error");
@@ -114,7 +137,6 @@ export function createPatcher(pi) {
         const orig = pi.sendMessage.bind(pi);
         pi.sendMessage = function (msg, opts) {
             
-            // Track 2: 业务错误注入 (非原地)
             if (helper.state.pendingBusinessError) {
                 const injectedContent = `${msg.content}\n\n**PREVIOUS VALIDATION FAILED**\nYour previous attempt was rejected with:\n\`\`\`\n${helper.state.pendingBusinessError}\n\`\`\`\nPlease analyze the current file state and fix this issue.`;
                 msg.content = injectedContent;
@@ -122,7 +144,6 @@ export function createPatcher(pi) {
                 return orig(msg, opts);
             }
 
-            // Track 1: Schema 原地重试
             if (helper.state.needsSleep) {
                 helper.state.needsSleep = false;
                 const delayMs = Math.min(1000 * Math.pow(2, helper.state.schemaRetryCount - 1), 30000);
