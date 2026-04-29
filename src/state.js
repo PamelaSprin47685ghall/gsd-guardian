@@ -2,16 +2,13 @@
 
 export function createGuardianState() {
     const state = {
-        retryCount: 0,
-        isFixingMode: false,
-        isFixingModePending: false,
-        isInplaceRetry: false,
+        schemaRetryCount: 0,     // 用于原地重试 (不丢上下文)
+        businessRetryCount: 0,   // 用于业务报错重试 (刷新上下文)
+        isInplaceRetry: false,   // 标记是否要拦截 newSession
+        hiddenToolError: null,   // 缓存被拦截的 Schema 错误
+        pendingBusinessError: null, // 缓存业务报错，等待注入新 Session
         needsSleep: false,
-        lastErrorMsg: null,
-        lastErrorReason: null, 
-        errorOccurredTime: 0,  
-        cancelSleep: null,
-        restartTimer: null
+        cancelSleep: null
     };
 
     async function safeSleep(ms) {
@@ -29,17 +26,13 @@ export function createGuardianState() {
     }
 
     function reset() {
-        state.retryCount = 0;
-        state.isFixingMode = false;
-        state.isFixingModePending = false;
+        state.schemaRetryCount = 0;
+        state.businessRetryCount = 0;
         state.isInplaceRetry = false;
+        state.hiddenToolError = null;
+        state.pendingBusinessError = null;
         state.needsSleep = false;
-        state.lastErrorMsg = null;
-        state.lastErrorReason = null;
-        state.errorOccurredTime = 0;
         if (state.cancelSleep) state.cancelSleep();
-        if (state.restartTimer) clearTimeout(state.restartTimer);
-        state.restartTimer = null;
     }
 
     return { state, safeSleep, reset };

@@ -2,8 +2,10 @@
 
 const MAX_RETRIES = 10;
 let gsdSessionStore = null;
+let gsdModsStore = null;
 
 export function setGsdRuntimeModules(mods) {
+    gsdModsStore = mods;
     gsdSessionStore = mods?.["auto-runtime-state"] ?? null;
 }
 
@@ -11,22 +13,27 @@ export function createPatcher(pi) {
     let cmdCtxPatched = false;
     let retryMapPatched = false;
     let sendMsgPatched = false;
+    let uiPatched = false;
     let currentCtx = null;
 
+    // ── Track 1: 原地重试保障 (拦截上下文清洗) ──
     function patchCmdCtx(helper) {
         const ctx = gsdSessionStore?.autoSession?.cmdCtx;
         if (!ctx || cmdCtxPatched) return;
         const orig = ctx.newSession;
         ctx.newSession = async function (opts) {
+            // 只有标记为原地重试时，才阻止清理上下文
             if (helper.state.isInplaceRetry) {
                 helper.state.isInplaceRetry = false;
                 return { cancelled: false };
             }
+            // 业务错误重试时放行，获取干净的上下文
             return orig.apply(this, [opts]);
         };
         cmdCtxPatched = true;
     }
 
+    // ── Track 1: 拦截产物校验失败 (触发原地重试) ──
     function patchRetryMap(helper) {
         const map = gsdSessionStore?.autoSession?.verificationRetryCount;
         if (!map || retryMapPatched) return;
@@ -34,114 +41,105 @@ export function createPatcher(pi) {
         const origDelete = map.delete.bind(map);
 
         map.set = function (key, val) {
-            helper.state.retryCount++;
-            if (helper.state.retryCount <= MAX_RETRIES) {
+            helper.state.schemaRetryCount++;
+            if (helper.state.schemaRetryCount <= MAX_RETRIES) {
                 helper.state.isInplaceRetry = true;
                 helper.state.needsSleep = true;
-                return origSet(key, 1);
+                return origSet(key, 1); // 骗过 GSD：永远是第 1 次重试
             }
-            helper.state.isInplaceRetry = true;
-            helper.state.isFixingModePending = true;
-            return origSet(key, 4); 
+            // 次数耗尽，让其自然失败
+            helper.state.schemaRetryCount = 0;
+            helper.state.hiddenToolError = null;
+            return origSet(key, val); 
         };
 
         map.delete = function (key) {
-            helper.state.retryCount = 0;
+            helper.state.schemaRetryCount = 0;
             return origDelete(key);
         };
         retryMapPatched = true;
     }
 
-    // ── Patch 3: 全局业务错误捕获器 (UI 探针模式) ──
-    // 放弃不稳定的属性劫持，直接监控控制台输出的文字！
+    // ── Track 2: 业务错误探针 (触发非原地重试) ──
     function patchUI(helper) {
-        if (!currentCtx || currentCtx.ui.__guardian_patched) return;
+        if (!currentCtx || uiPatched) return;
+        if (!currentCtx.ui.__guardian_patched) {
+            let lastErrorOrWarning = "";
+            let errorTime = 0;
 
-        const origNotify = currentCtx.ui.notify.bind(currentCtx.ui);
-        currentCtx.ui.notify = function(msg, level) {
-            if (typeof msg === "string" && !msg.includes("[Guardian]")) {
-                
-                // 1. 记录报错信息
-                if (level === "error" || level === "warning") {
-                    // 如果短时间内连续报错，拼接到一起
-                    if (Date.now() - helper.state.errorOccurredTime < 1000) {
-                        helper.state.lastErrorReason += "\n\n" + msg;
-                    } else {
-                        helper.state.lastErrorReason = msg;
+            const origNotify = currentCtx.ui.notify.bind(currentCtx.ui);
+            currentCtx.ui.notify = function(msg, level) {
+                if (typeof msg === "string" && !msg.includes("[Guardian]")) {
+                    
+                    // 1. 抓取红色报错或警告
+                    if (level === "error" || level === "warning") {
+                        if (Date.now() - errorTime < 1000) {
+                            lastErrorOrWarning += "\n" + msg;
+                        } else {
+                            lastErrorOrWarning = msg;
+                        }
+                        errorTime = Date.now();
                     }
-                    helper.state.errorOccurredTime = Date.now();
+
+                    // 2. 捕捉到停机指令，且刚刚有报错
+                    if (msg.includes("mode paused") && msg.includes("to resume")) {
+                        if (Date.now() - errorTime < 3000) {
+                            helper.state.businessRetryCount++;
+                            if (helper.state.businessRetryCount <= MAX_RETRIES) {
+                                currentCtx.ui.notify(`[Guardian] Business logic issue detected. Restarting pipeline (Attempt ${helper.state.businessRetryCount}/${MAX_RETRIES})...`, "warning");
+                                
+                                // 缓存错误信息，供新 Session 发信时注入
+                                helper.state.pendingBusinessError = lastErrorOrWarning;
+                                
+                                // 等待 1.5 秒让 GSD 彻底清理完当前循环，然后从外部拉起新的 Auto Loop！
+                                setTimeout(() => {
+                                    const api = gsdModsStore?.["auto"];
+                                    if (api) api.startAutoDetached(currentCtx, pi, process.cwd(), false);
+                                }, 1500);
+                            } else {
+                                currentCtx.ui.notify(`[Guardian] Business retries exhausted. Manual intervention required.`, "error");
+                                helper.state.businessRetryCount = 0;
+                            }
+                        }
+                    }
                 }
-
-                // 2. 捕捉到 GSD 打印的停机语句
-                if (msg.includes("mode paused") && msg.includes("to resume")) {
-                    // 延迟一点点触发，确保所有 UI 消息都已经打印完
-                    setTimeout(() => checkUniversalErrorRecovery(), 100);
-                }
-            }
-            return origNotify(msg, level);
-        };
-        currentCtx.ui.__guardian_patched = true;
-
-        function checkUniversalErrorRecovery() {
-            // 如果正在处理 Schema 崩溃的原地重试，不要干预
-            if (helper.state.isInplaceRetry || helper.state.isFixingMode) return;
-
-            const now = Date.now();
-            // 如果停机前 5 秒内有过 Error / Warning 报错，那必然是被它干停的！
-            if (helper.state.errorOccurredTime && (now - helper.state.errorOccurredTime < 5000)) {
-                helper.state.errorOccurredTime = 0;
-                helper.state.isFixingMode = true;
-                helper.state.retryCount = 0;
-
-                const errorDetails = helper.state.lastErrorReason;
-                currentCtx.ui.notify(`[Guardian] Business logic issue detected. Handing over to LLM for repair...`, "warning");
-
-                // 发送修复指令 (用 followUp 完美保留上下文)
-                setTimeout(() => {
-                    pi.sendMessage({
-                        customType: "gsd-guardian-fix",
-                        content: `**AUTO-MODE PAUSED DUE TO VALIDATION ERROR**\n\nThe system rejected your previous output with the following error/warning:\n\`\`\`\n${errorDetails}\n\`\`\`\n\nPlease deeply analyze the workspace and fix the blocking issues (e.g., missing fields, unmet schema requirements, broken references, or warnings). Do NOT proceed with the main task yet. I will automatically resume Auto Mode after you finish.`,
-                        display: true
-                    }, { triggerTurn: true, deliverAs: "followUp" });
-                }, 1500);
-            }
+                return origNotify(msg, level);
+            };
+            currentCtx.ui.__guardian_patched = true;
+            uiPatched = true;
         }
     }
 
+    // ── 拦截消息发送 (分发两种重试弹药) ──
     function patchSendMessage(helper) {
         if (sendMsgPatched) return;
         const orig = pi.sendMessage.bind(pi);
         pi.sendMessage = function (msg, opts) {
-            if (helper.state.isFixingModePending) {
-                helper.state.isFixingModePending = false;
-                helper.state.isFixingMode = true;
-                currentCtx?.ui?.notify?.("[Guardian] 10 retries exhausted. Entering LLM repair mode...", "error");
-                const fixMsg = {
-                    customType: "gsd-guardian-fix",
-                    content: "**CRITICAL FAILURE**\n10 consecutive failures occurred. Auto Mode is paused.\n\nPlease deeply analyze the workspace, fix any logical, compilation, or schema errors. Do NOT try to proceed with the main task yet.",
-                    display: true
-                };
-                return orig(fixMsg, { triggerTurn: true, deliverAs: "followUp" });
+            
+            // Track 2: 业务错误注入 (非原地，刷新了上下文)
+            if (helper.state.pendingBusinessError) {
+                const injectedContent = `${msg.content}\n\n**PREVIOUS VALIDATION FAILED**\nYour previous attempt was rejected with:\n\`\`\`\n${helper.state.pendingBusinessError}\n\`\`\`\nPlease analyze the current file state and fix this issue.`;
+                msg.content = injectedContent;
+                helper.state.pendingBusinessError = null;
+                return orig(msg, opts);
             }
 
+            // Track 1: Schema 原地重试 (完美保留上下文)
             if (helper.state.needsSleep) {
                 helper.state.needsSleep = false;
-                const delayMs = Math.min(1000 * Math.pow(2, helper.state.retryCount - 1), 30000);
-                currentCtx?.ui?.notify?.(`[Guardian] Auto Mode in-place retry ${helper.state.retryCount}/${MAX_RETRIES} in ${delayMs / 1000}s...`, "warning");
+                const delayMs = Math.min(1000 * Math.pow(2, helper.state.schemaRetryCount - 1), 30000);
+                currentCtx?.ui?.notify?.(`[Guardian] Auto Mode in-place retry ${helper.state.schemaRetryCount}/${MAX_RETRIES} in ${delayMs / 1000}s...`, "warning");
 
                 let finalMsg = msg;
-                let finalOpts = opts;
+                const finalOpts = { ...opts, deliverAs: "followUp" }; // 核心：使用 followUp 追击
 
-                if (helper.state.isInplaceRetry) {
-                    finalOpts = { ...opts, deliverAs: "followUp" };
-                    if (helper.state.lastErrorMsg) {
-                        finalMsg = {
-                            customType: "gsd-guardian-retry",
-                            content: `**CRITICAL FAILURE**\nThe previous execution failed with error:\n\`\`\`\n${helper.state.lastErrorMsg}\n\`\`\`\nPlease carefully correct your parameters/schema and retry exactly the same step.`,
-                            display: false
-                        };
-                        helper.state.lastErrorMsg = null;
-                    }
+                if (helper.state.hiddenToolError) {
+                    finalMsg = {
+                        customType: "gsd-guardian-retry",
+                        content: `**EXECUTION ERROR**\nThe tool execution failed with:\n\`\`\`\n${helper.state.hiddenToolError}\n\`\`\`\nPlease carefully correct your parameters/schema and retry exactly the same step.`,
+                        display: false
+                    };
+                    helper.state.hiddenToolError = null;
                 }
 
                 helper.safeSleep(delayMs).then(() => {
@@ -149,6 +147,7 @@ export function createPatcher(pi) {
                 }).catch(() => {});
                 return;
             }
+            
             return orig(msg, opts);
         };
         sendMsgPatched = true;

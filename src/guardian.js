@@ -28,83 +28,57 @@ export default function guardianPlugin(pi) {
         patcher.applyAll(helper, ctx);
     });
 
+    // ── 核心防御：提前隐瞒 Schema / 工具报错 ──
+    pi.on("turn_end", (event) => {
+        const msg = event.message;
+        if (msg && msg.stopReason === "error") {
+            const s = gsdMods?.["auto-runtime-state"]?.autoSession;
+            const isAuto = s?.active;
+            
+            if (isAuto) {
+                // 缓存真实错误供 FollowUp 使用
+                helper.state.hiddenToolError = s.lastToolInvocationError || msg.errorMessage || "Unknown Error";
+                // 瞒天过海，让 GSD 走向产物校验并触发 Map 拦截
+                msg.stopReason = "stop";
+                s.lastToolInvocationError = null; 
+            } else {
+                // Manual Mode 打标记
+                event.__guardian_manual_error = msg.errorMessage || "Unknown Error";
+            }
+        }
+    });
+
     pi.on("agent_end", async (event, ctx) => {
         await ensureMods(ctx);
         patcher.applyAll(helper, ctx);
 
         const lastMsg = event.messages?.[event.messages.length - 1];
-        const stopReason = lastMsg?.stopReason;
-
-        // 用户按 Esc 手动中断
-        if (stopReason === "aborted") {
+        if (lastMsg?.stopReason === "aborted") {
             helper.reset();
             return;
         }
 
         const isAuto = gsdMods?.["auto"]?.isAutoActive() || !!process.env.GSD_PROJECT_ROOT;
 
-        // ── LLM 修复完毕，无缝接续 Auto Mode ──
-        if (helper.state.isFixingMode) {
-            helper.state.isFixingMode = false;
-            helper.state.retryCount = 0;
-            if (stopReason === "error") {
-                ctx?.ui?.notify?.("Guardian: LLM self-repair failed", "error");
-                return;
-            }
-            ctx?.ui?.notify?.("Guardian: LLM self-repair complete. Resuming /gsd auto...", "success");
-            const api = gsdMods?.["auto"];
-            // 强行把它从沉睡中拉起！
-            if (api && !api.isAutoActive()) {
-                api.startAutoDetached(ctx, pi, process.cwd(), false);
-            }
-            return;
-        }
-
-        // ── 处理 Schema 错误引起的崩溃 ──
-        if (stopReason === "error") {
-            helper.state.retryCount++;
-            
-            if (helper.state.retryCount <= MAX_RETRIES) {
-                helper.state.lastErrorMsg = lastMsg.errorMessage || "Unknown execution error";
-                
-                if (isAuto) {
-                    helper.state.isInplaceRetry = true;
-                    helper.state.needsSleep = true;
-                    helper.state.restartTimer = setTimeout(() => {
-                        const api = gsdMods?.["auto"];
-                        if (api && !api.isAutoActive()) {
-                            api.startAutoDetached(ctx, pi, process.cwd(), false);
-                        }
-                    }, 1000);
-                } else {
-                    const delayMs = Math.min(1000 * Math.pow(2, helper.state.retryCount - 1), 30000);
-                    ctx?.ui?.notify?.(`[Guardian] Manual Mode error. Retry ${helper.state.retryCount}/${MAX_RETRIES} in ${delayMs / 1000}s...`, "warning");
-                    helper.state.restartTimer = setTimeout(() => {
-                        pi.sendMessage({
-                            customType: "gsd-guardian-retry",
-                            content: `Execution error: ${helper.state.lastErrorMsg}\n\nPlease correct your parameters and try exactly the same step again.`,
-                            display: false
-                        }, { triggerTurn: true, deliverAs: "followUp" });
-                        helper.state.lastErrorMsg = null;
-                    }, delayMs);
-                }
+        // Manual Mode 的原地重试
+        if (event.__guardian_manual_error && !isAuto) {
+            helper.state.schemaRetryCount++;
+            if (helper.state.schemaRetryCount <= MAX_RETRIES) {
+                const delayMs = Math.min(1000 * Math.pow(2, helper.state.schemaRetryCount - 1), 30000);
+                ctx?.ui?.notify?.(`[Guardian] Manual Mode error. Retry ${helper.state.schemaRetryCount}/${MAX_RETRIES} in ${delayMs / 1000}s...`, "warning");
+                try {
+                    await helper.safeSleep(delayMs);
+                    pi.sendMessage({
+                        customType: "gsd-guardian-retry",
+                        content: `Execution error: ${event.__guardian_manual_error}\n\nPlease correct your parameters and try exactly the same step again.`,
+                        display: false
+                    }, { triggerTurn: true, deliverAs: "followUp" });
+                } catch (e) {}
             } else {
-                helper.state.retryCount = 0;
-                if (isAuto) {
-                    helper.state.isInplaceRetry = true;
-                    helper.state.isFixingModePending = true;
-                    helper.state.restartTimer = setTimeout(() => {
-                        const api = gsdMods?.["auto"];
-                        if (api && !api.isAutoActive()) {
-                            api.startAutoDetached(ctx, pi, process.cwd(), false);
-                        }
-                    }, 1000);
-                } else {
-                    ctx?.ui?.notify?.("[Guardian] 10 retries exhausted. Giving up in manual mode.", "error");
-                }
+                helper.state.schemaRetryCount = 0;
+                ctx?.ui?.notify?.("[Guardian] 10 retries exhausted. Giving up in manual mode.", "error");
             }
         } else if (!isAuto) {
-            // Manual Mode 正常结束
             helper.reset();
         }
     });
