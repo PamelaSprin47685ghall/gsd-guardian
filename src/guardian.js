@@ -28,6 +28,15 @@ export default function guardianPlugin(pi) {
         patcher.applyAll(helper, ctx);
     });
 
+    // ── 配合属性黑洞：同步篡改 stopReason，避免核心崩溃 ──
+    pi.on("turn_end", (event) => {
+        const msg = event.message;
+        if (msg && msg.stopReason === "error") {
+            msg.__guardian_manual_error = msg.errorMessage || "Unknown execution error";
+            msg.stopReason = "stop";
+        }
+    });
+
     pi.on("agent_end", async (event, ctx) => {
         await ensureMods(ctx);
         patcher.applyAll(helper, ctx);
@@ -57,7 +66,7 @@ export default function guardianPlugin(pi) {
             return;
         }
 
-        if (event.__guardian_manual_error && !isAuto) {
+        if (lastMsg?.__guardian_manual_error && !isAuto) {
             helper.state.retryCount++;
             if (helper.state.retryCount <= MAX_RETRIES) {
                 const delayMs = Math.min(1000 * Math.pow(2, helper.state.retryCount - 1), 30000);

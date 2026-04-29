@@ -11,7 +11,7 @@ export function createPatcher(pi) {
     let cmdCtxPatched = false;
     let retryMapPatched = false;
     let sendMsgPatched = false;
-    let emitPatched = false;
+    let toolErrorPatched = false;
     let currentCtx = null;
 
     // ── Patch 1: Hijack AutoSession.cmdCtx.newSession() ──
@@ -87,11 +87,10 @@ export function createPatcher(pi) {
         sendMsgPatched = true;
     }
 
-    // ── Patch 4: Hijack pi.emit & Attribute Devourer ──
-    function patchEmit() {
-        if (emitPatched) return;
+    // ── Patch 4: 终极杀招 - 属性代理劫持 (只做属性黑洞，不碰 pi.emit) ──
+    function patchToolError() {
+        if (toolErrorPatched) return;
 
-        // 【终极黑洞】一旦拿到 autoSession 实例，立刻重写它的报错属性，让它水火不侵
         const s = gsdSessionStore?.autoSession;
         if (s && !s.__guardian_tool_patched) {
             let realError = s.lastToolInvocationError;
@@ -101,9 +100,8 @@ export function createPatcher(pi) {
                     return realError;
                 },
                 set: function (val) {
-                    // Auto Mode 拒绝任何写入（吞噬）
                     if (this.active) {
-                        realError = null;
+                        realError = null; // Auto Mode 拒绝任何错误写入（吞噬）
                     } else {
                         realError = val;
                     }
@@ -112,24 +110,7 @@ export function createPatcher(pi) {
             });
             s.__guardian_tool_patched = true;
         }
-
-        const origEmit = pi.emit.bind(pi);
-        pi.emit = function (eventName, ...args) {
-            if (eventName === "agent_end") {
-                const event = args[0];
-                const lastMsg = event?.messages?.[event.messages.length - 1];
-                if (lastMsg?.stopReason === "error") {
-                    const isAuto = gsdSessionStore?.autoSession?.active || !!process.env.GSD_PROJECT_ROOT;
-                    lastMsg.stopReason = "stop";
-
-                    if (!isAuto) {
-                        event.__guardian_manual_error = lastMsg.errorMessage || "Unknown execution error";
-                    }
-                }
-            }
-            return origEmit(eventName, ...args);
-        };
-        emitPatched = true;
+        toolErrorPatched = true;
     }
 
     function applyAll(helper, ctx) {
@@ -137,7 +118,7 @@ export function createPatcher(pi) {
         patchCmdCtx(helper);
         patchRetryMap(helper);
         patchSendMessage(helper);
-        patchEmit();
+        patchToolError(); // 只做属性劫持，不碰 pi.emit
     }
 
     return { applyAll };
