@@ -11,7 +11,8 @@ export function createPatcher(pi) {
     let cmdCtxPatched = false;
     let retryMapPatched = false;
     let sendMsgPatched = false;
-    let currentCtx = null; 
+    let toolErrorPatched = false;
+    let currentCtx = null;
 
     // ── Patch 1: Hijack AutoSession.cmdCtx.newSession() ──
     function patchCmdCtx(helper) {
@@ -84,11 +85,32 @@ export function createPatcher(pi) {
         sendMsgPatched = true;
     }
 
+    // ── Patch 4: 终极杀招 - 属性代理劫持 lastToolInvocationError ──
+    // 强制 GSD 在 Auto Mode 下变成"瞎子"，永远看不到 Schema 或工具错误，逼它重试！
+    function patchToolError(helper) {
+        const s = gsdSessionStore?.autoSession;
+        if (!s || toolErrorPatched) return;
+
+        let realError = s.lastToolInvocationError;
+        Object.defineProperty(s, "lastToolInvocationError", {
+            get: function () {
+                if (this.active) return null;
+                return realError;
+            },
+            set: function (val) {
+                realError = val;
+            },
+            configurable: true
+        });
+        toolErrorPatched = true;
+    }
+
     function applyAll(helper, ctx) {
         if (ctx) currentCtx = ctx;
         patchCmdCtx(helper);
         patchRetryMap(helper);
         patchSendMessage(helper);
+        patchToolError(helper);
     }
 
     return { applyAll };
