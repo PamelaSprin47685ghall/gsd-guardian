@@ -35,7 +35,6 @@ export default function guardianPlugin(pi) {
         const lastMsg = event.messages?.[event.messages.length - 1];
         const stopReason = lastMsg?.stopReason;
 
-        // User interrupt — full reset
         if (stopReason === "aborted") {
             helper.reset();
             return;
@@ -43,7 +42,7 @@ export default function guardianPlugin(pi) {
 
         const isAuto = gsdMods?.["auto"]?.isAutoActive() || !!process.env.GSD_PROJECT_ROOT;
 
-        // ── Fix mode: LLM repair completed ──
+        // ── LLM 修复回合结束，自动恢复 /gsd auto ──
         if (helper.state.isFixingMode) {
             helper.state.isFixingMode = false;
             helper.state.retryCount = 0;
@@ -51,15 +50,16 @@ export default function guardianPlugin(pi) {
                 ctx?.ui?.notify?.("Guardian: LLM self-repair failed", "error");
                 return;
             }
-            ctx?.ui?.notify?.("Guardian: LLM self-repair complete. Resuming...", "success");
+            ctx?.ui?.notify?.("Guardian: LLM self-repair complete. Resuming /gsd auto...", "success");
             const api = gsdMods?.["auto"];
+            // LLM 修好了，帮用户敲入 /gsd auto
             if (api && !api.isAutoActive()) {
                 api.startAutoDetached(ctx, pi, process.cwd(), false);
             }
             return;
         }
 
-        // ── 核心死灵法术：系统崩溃处理 ──
+        // ── 底层 Schema / 工具崩溃 ──
         if (stopReason === "error") {
             helper.state.retryCount++;
             
@@ -67,9 +67,9 @@ export default function guardianPlugin(pi) {
                 helper.state.lastErrorMsg = lastMsg.errorMessage || "Unknown execution error";
                 
                 if (isAuto) {
-                    // 让 GSD 自然去 pauseAuto，我们设定 1 秒后将其复活
                     helper.state.isInplaceRetry = true;
                     helper.state.needsSleep = true;
+                    // 让 GSD 自然去 pauseAuto，1 秒后将其原地复活
                     helper.state.restartTimer = setTimeout(() => {
                         const api = gsdMods?.["auto"];
                         if (api && !api.isAutoActive()) {
@@ -77,7 +77,6 @@ export default function guardianPlugin(pi) {
                         }
                     }, 1000);
                 } else {
-                    // Manual mode
                     const delayMs = Math.min(1000 * Math.pow(2, helper.state.retryCount - 1), 30000);
                     ctx?.ui?.notify?.(`[Guardian] Manual Mode error. Retry ${helper.state.retryCount}/${MAX_RETRIES} in ${delayMs / 1000}s...`, "warning");
                     helper.state.restartTimer = setTimeout(() => {
@@ -90,7 +89,6 @@ export default function guardianPlugin(pi) {
                     }, delayMs);
                 }
             } else {
-                // 10 次上限耗尽
                 helper.state.retryCount = 0;
                 if (isAuto) {
                     helper.state.isInplaceRetry = true;
@@ -106,7 +104,6 @@ export default function guardianPlugin(pi) {
                 }
             }
         } else if (!isAuto) {
-            // Normal mode successful end
             helper.reset();
         }
     });

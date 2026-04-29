@@ -8,8 +8,10 @@ export function createGuardianState() {
         isInplaceRetry: false,
         needsSleep: false,
         lastErrorMsg: null,
+        lastErrorReason: null, // 用于捕获业务级校验报错
+        errorOccurredTime: 0,  // 记录报错时间戳
         cancelSleep: null,
-        restartTimer: null // 用于打断复活倒计时
+        restartTimer: null
     };
 
     async function safeSleep(ms) {
@@ -33,6 +35,8 @@ export function createGuardianState() {
         state.isInplaceRetry = false;
         state.needsSleep = false;
         state.lastErrorMsg = null;
+        state.lastErrorReason = null;
+        state.errorOccurredTime = 0;
         if (state.cancelSleep) state.cancelSleep();
         if (state.restartTimer) clearTimeout(state.restartTimer);
         state.restartTimer = null;
