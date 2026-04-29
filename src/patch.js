@@ -10,17 +10,13 @@ export function setGsdRuntimeModules(mods) {
 }
 
 export function createPatcher(pi) {
-    let cmdCtxPatched = false;
-    let retryMapPatched = false;
-    let sendMsgPatched = false;
-    let uiPatched = false;
     let currentCtx = null;
 
     // ── Patch 1: Hijack AutoSession.cmdCtx.newSession() ──
     function patchCmdCtx(helper) {
         const ctx = gsdSessionStore?.autoSession?.cmdCtx;
         if (ctx && typeof ctx.newSession === "function") {
-            // 实时更新缓存，永远保持最新
+            // Keep the cache updated with the latest valid command context
             helper.state.validCmdCtx = ctx; 
 
             if (!ctx.__guardian_patched) {
@@ -40,7 +36,8 @@ export function createPatcher(pi) {
     // ── Patch 2: Hijack verificationRetryCount Map ──
     function patchRetryMap(helper) {
         const map = gsdSessionStore?.autoSession?.verificationRetryCount;
-        if (!map || retryMapPatched) return;
+        if (!map || map.__guardian_patched) return;
+        
         const origSet = map.set.bind(map);
         const origDelete = map.delete.bind(map);
 
@@ -60,12 +57,15 @@ export function createPatcher(pi) {
             helper.state.schemaRetryCount = 0;
             return origDelete(key);
         };
-        retryMapPatched = true;
+        map.__guardian_patched = true;
     }
 
-    // ── Patch 3: 业务错误探针 (触发非原地重试) ──
+    // ── Patch 3: Business Logic Error Probe (Triggers Non-Inplace Retry) ──
     function patchUI(helper) {
-        if (!currentCtx || uiPatched) return;
+        if (!currentCtx || !currentCtx.ui) return;
+        
+        // CRITICAL FIX: Bind to the object instance, not a global boolean,
+        // because new contexts are created on every slash command (/gsd auto).
         if (!currentCtx.ui.__guardian_patched) {
             let lastErrorOrWarning = "";
             let errorTime = 0;
@@ -93,7 +93,7 @@ export function createPatcher(pi) {
                                 setTimeout(() => {
                                     const api = gsdModsStore?.["auto"];
                                     if (api) {
-                                        // 终极武器：我们自己造一个绝对不会报错的 Context！
+                                        // The ultimate weapon: Construct a bulletproof context
                                         const robustCtx = helper.state.validCmdCtx || currentCtx;
                                         if (typeof robustCtx.newSession !== "function") {
                                             robustCtx.newSession = async (opts) => {
@@ -101,7 +101,6 @@ export function createPatcher(pi) {
                                                     helper.state.isInplaceRetry = false;
                                                     return { cancelled: false };
                                                 }
-                                                // 退化到通过 sessionManager 创建
                                                 try {
                                                     const res = await currentCtx.sessionManager?.newSession(opts);
                                                     return res ?? { cancelled: false };
@@ -127,16 +126,16 @@ export function createPatcher(pi) {
                 return origNotify(msg, level);
             };
             currentCtx.ui.__guardian_patched = true;
-            uiPatched = true;
         }
     }
 
-    // ── Patch 4: 拦截消息发送 ──
+    // ── Patch 4: Intercept Message Dispatch ──
     function patchSendMessage(helper) {
-        if (sendMsgPatched) return;
+        if (pi.__guardian_send_patched) return;
         const orig = pi.sendMessage.bind(pi);
         pi.sendMessage = function (msg, opts) {
             
+            // Track 2: Inject Business Error (Non-inplace)
             if (helper.state.pendingBusinessError) {
                 const injectedContent = `${msg.content}\n\n**PREVIOUS VALIDATION FAILED**\nYour previous attempt was rejected with:\n\`\`\`\n${helper.state.pendingBusinessError}\n\`\`\`\nPlease analyze the current file state and fix this issue.`;
                 msg.content = injectedContent;
@@ -144,6 +143,7 @@ export function createPatcher(pi) {
                 return orig(msg, opts);
             }
 
+            // Track 1: Schema In-place Retry
             if (helper.state.needsSleep) {
                 helper.state.needsSleep = false;
                 const delayMs = Math.min(1000 * Math.pow(2, helper.state.schemaRetryCount - 1), 30000);
@@ -169,7 +169,7 @@ export function createPatcher(pi) {
             
             return orig(msg, opts);
         };
-        sendMsgPatched = true;
+        pi.__guardian_send_patched = true;
     }
 
     function applyAll(helper, ctx) {
