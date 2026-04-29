@@ -2,16 +2,15 @@
 
 export function createGuardianState() {
     const state = {
-        schemaRetryCount: 0,     
-        businessRetryCount: 0,   
-        isInplaceRetry: false,   
-        hiddenToolError: null,   
-        pendingBusinessError: null, 
+        retryCount: 0,
+        isFixingMode: false,
+        isFixingModePending: false,
+        isInplaceRetry: false,
         needsSleep: false,
-        cancelSleep: null,
-        validCmdCtx: null,       // 缓存真命天子：拥有 newSession 方法的上下文
-        lastErrorReason: null, 
-        errorOccurredTime: 0
+        schemaErrorMsg: null,
+        lastBusinessError: null,
+        validCmdCtx: null, // 缓存含有 newSession 的上下文
+        cancelSleep: null
     };
 
     async function safeSleep(ms) {
@@ -29,16 +28,14 @@ export function createGuardianState() {
     }
 
     function reset() {
-        state.schemaRetryCount = 0;
-        state.businessRetryCount = 0;
+        state.retryCount = 0;
+        state.isFixingMode = false;
+        state.isFixingModePending = false;
         state.isInplaceRetry = false;
-        state.hiddenToolError = null;
-        state.pendingBusinessError = null;
         state.needsSleep = false;
-        state.lastErrorReason = null;
-        state.errorOccurredTime = 0;
+        state.schemaErrorMsg = null;
+        state.lastBusinessError = null;
         if (state.cancelSleep) state.cancelSleep();
-        // validCmdCtx 不重置，以便复活时兜底使用
     }
 
     return { state, safeSleep, reset };
