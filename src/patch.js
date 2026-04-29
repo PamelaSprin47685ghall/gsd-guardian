@@ -11,10 +11,10 @@ export function createPatcher(pi) {
     let cmdCtxPatched = false;
     let retryMapPatched = false;
     let sendMsgPatched = false;
-    let toolErrorPatched = false;
     let currentCtx = null;
 
     // ── Patch 1: Hijack AutoSession.cmdCtx.newSession() ──
+    // 拦截复活后的上下文清洗，完美继承死前的记忆
     function patchCmdCtx(helper) {
         const ctx = gsdSessionStore?.autoSession?.cmdCtx;
         if (!ctx || cmdCtxPatched) return;
@@ -30,6 +30,7 @@ export function createPatcher(pi) {
     }
 
     // ── Patch 2: Hijack verificationRetryCount Map ──
+    // 处理正常的产物缺失重试 (Artifact Missing)
     function patchRetryMap(helper) {
         const map = gsdSessionStore?.autoSession?.verificationRetryCount;
         if (!map || retryMapPatched) return;
@@ -43,15 +44,9 @@ export function createPatcher(pi) {
                 helper.state.needsSleep = true;
                 return origSet(key, 1);
             }
-            helper.state.isFixingMode = true;
-            setTimeout(() => {
-                pi.sendMessage({
-                    customType: "gsd-guardian-fix",
-                    content: "**CRITICAL FAILURE**\n10 consecutive failures occurred. Auto Mode is paused.\n\nPlease deeply analyze the workspace, fix any logical, compilation, or schema errors. Do NOT try to proceed with the main task yet, just fix the blockers. I will automatically resume Auto Mode after this turn.",
-                    display: true
-                }, { triggerTurn: true, deliverAs: "followUp" });
-            }, 1500);
-            return origSet(key, 4);
+            helper.state.isInplaceRetry = true;
+            helper.state.isFixingModePending = true;
+            return origSet(key, 4); 
         };
 
         map.delete = function (key) {
@@ -62,10 +57,24 @@ export function createPatcher(pi) {
     }
 
     // ── Patch 3: Hijack pi.sendMessage ──
+    // 在复活后，替换 GSD 的通用 Prompt，换成我们带有 Error 的纠错弹药
     function patchSendMessage(helper) {
         if (sendMsgPatched) return;
         const orig = pi.sendMessage.bind(pi);
         pi.sendMessage = function (msg, opts) {
+            // 如果 10 次耗尽，强制发出修复指令
+            if (helper.state.isFixingModePending) {
+                helper.state.isFixingModePending = false;
+                helper.state.isFixingMode = true;
+                currentCtx?.ui?.notify?.("[Guardian] 10 retries exhausted. Entering LLM repair mode...", "error");
+                const fixMsg = {
+                    customType: "gsd-guardian-fix",
+                    content: "**CRITICAL FAILURE**\n10 consecutive failures occurred. Auto Mode is paused.\n\nPlease deeply analyze the workspace, fix any logical, compilation, or schema errors. Do NOT try to proceed with the main task yet, just fix the blockers.",
+                    display: true
+                };
+                return orig(fixMsg, { triggerTurn: true, deliverAs: "followUp" });
+            }
+
             if (helper.state.needsSleep) {
                 helper.state.needsSleep = false;
                 const delayMs = Math.min(1000 * Math.pow(2, helper.state.retryCount - 1), 30000);
@@ -75,10 +84,19 @@ export function createPatcher(pi) {
                     "warning"
                 );
 
-                const overrideOpts = { ...opts, deliverAs: "followUp" };
+                let finalMsg = msg;
+                // 如果是 Schema 崩溃复活，我们用 Error 覆盖原有的 Prompt
+                if (helper.state.lastErrorMsg) {
+                    finalMsg = {
+                        customType: "gsd-guardian-retry",
+                        content: `**CRITICAL FAILURE**\nThe previous tool execution failed with error:\n\`\`\`\n${helper.state.lastErrorMsg}\n\`\`\`\nPlease carefully correct your parameters/schema and retry exactly the same step.`,
+                        display: false
+                    };
+                    helper.state.lastErrorMsg = null;
+                }
 
                 helper.safeSleep(delayMs).then(() => {
-                    orig(msg, overrideOpts);
+                    orig(finalMsg, { ...opts, deliverAs: "followUp" });
                 }).catch(() => {});
                 return;
             }
@@ -87,38 +105,11 @@ export function createPatcher(pi) {
         sendMsgPatched = true;
     }
 
-    // ── Patch 4: 终极杀招 - 属性代理劫持 (只做属性黑洞，不碰 pi.emit) ──
-    function patchToolError() {
-        if (toolErrorPatched) return;
-
-        const s = gsdSessionStore?.autoSession;
-        if (s && !s.__guardian_tool_patched) {
-            let realError = s.lastToolInvocationError;
-            Object.defineProperty(s, "lastToolInvocationError", {
-                get: function () {
-                    if (this.active) return null; // Auto Mode 下永远是瞎子
-                    return realError;
-                },
-                set: function (val) {
-                    if (this.active) {
-                        realError = null; // Auto Mode 拒绝任何错误写入（吞噬）
-                    } else {
-                        realError = val;
-                    }
-                },
-                configurable: true
-            });
-            s.__guardian_tool_patched = true;
-        }
-        toolErrorPatched = true;
-    }
-
     function applyAll(helper, ctx) {
         if (ctx) currentCtx = ctx;
         patchCmdCtx(helper);
         patchRetryMap(helper);
         patchSendMessage(helper);
-        patchToolError(); // 只做属性劫持，不碰 pi.emit
     }
 
     return { applyAll };

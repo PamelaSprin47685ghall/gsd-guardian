@@ -28,15 +28,6 @@ export default function guardianPlugin(pi) {
         patcher.applyAll(helper, ctx);
     });
 
-    // ── 配合属性黑洞：同步篡改 stopReason，避免核心崩溃 ──
-    pi.on("turn_end", (event) => {
-        const msg = event.message;
-        if (msg && msg.stopReason === "error") {
-            msg.__guardian_manual_error = msg.errorMessage || "Unknown execution error";
-            msg.stopReason = "stop";
-        }
-    });
-
     pi.on("agent_end", async (event, ctx) => {
         await ensureMods(ctx);
         patcher.applyAll(helper, ctx);
@@ -44,6 +35,7 @@ export default function guardianPlugin(pi) {
         const lastMsg = event.messages?.[event.messages.length - 1];
         const stopReason = lastMsg?.stopReason;
 
+        // User interrupt — full reset
         if (stopReason === "aborted") {
             helper.reset();
             return;
@@ -51,6 +43,7 @@ export default function guardianPlugin(pi) {
 
         const isAuto = gsdMods?.["auto"]?.isAutoActive() || !!process.env.GSD_PROJECT_ROOT;
 
+        // ── Fix mode: LLM repair completed ──
         if (helper.state.isFixingMode) {
             helper.state.isFixingMode = false;
             helper.state.retryCount = 0;
@@ -66,24 +59,54 @@ export default function guardianPlugin(pi) {
             return;
         }
 
-        if (lastMsg?.__guardian_manual_error && !isAuto) {
+        // ── 核心死灵法术：系统崩溃处理 ──
+        if (stopReason === "error") {
             helper.state.retryCount++;
+            
             if (helper.state.retryCount <= MAX_RETRIES) {
-                const delayMs = Math.min(1000 * Math.pow(2, helper.state.retryCount - 1), 30000);
-                ctx?.ui?.notify?.(`[Guardian] Manual Mode error. Retry ${helper.state.retryCount}/${MAX_RETRIES} in ${delayMs / 1000}s...`, "warning");
-                try {
-                    await helper.safeSleep(delayMs);
-                    pi.sendMessage({
-                        customType: "gsd-guardian-retry",
-                        content: `Execution error: ${event.__guardian_manual_error}\n\nPlease correct your parameters and try exactly the same step again.`,
-                        display: false
-                    }, { triggerTurn: true, deliverAs: "followUp" });
-                } catch (e) {}
+                helper.state.lastErrorMsg = lastMsg.errorMessage || "Unknown execution error";
+                
+                if (isAuto) {
+                    // 让 GSD 自然去 pauseAuto，我们设定 1 秒后将其复活
+                    helper.state.isInplaceRetry = true;
+                    helper.state.needsSleep = true;
+                    helper.state.restartTimer = setTimeout(() => {
+                        const api = gsdMods?.["auto"];
+                        if (api && !api.isAutoActive()) {
+                            api.startAutoDetached(ctx, pi, process.cwd(), false);
+                        }
+                    }, 1000);
+                } else {
+                    // Manual mode
+                    const delayMs = Math.min(1000 * Math.pow(2, helper.state.retryCount - 1), 30000);
+                    ctx?.ui?.notify?.(`[Guardian] Manual Mode error. Retry ${helper.state.retryCount}/${MAX_RETRIES} in ${delayMs / 1000}s...`, "warning");
+                    helper.state.restartTimer = setTimeout(() => {
+                        pi.sendMessage({
+                            customType: "gsd-guardian-retry",
+                            content: `Execution error: ${helper.state.lastErrorMsg}\n\nPlease correct your parameters and try exactly the same step again.`,
+                            display: false
+                        }, { triggerTurn: true, deliverAs: "followUp" });
+                        helper.state.lastErrorMsg = null;
+                    }, delayMs);
+                }
             } else {
+                // 10 次上限耗尽
                 helper.state.retryCount = 0;
-                ctx?.ui?.notify?.("[Guardian] 10 retries exhausted. Giving up in manual mode.", "error");
+                if (isAuto) {
+                    helper.state.isInplaceRetry = true;
+                    helper.state.isFixingModePending = true;
+                    helper.state.restartTimer = setTimeout(() => {
+                        const api = gsdMods?.["auto"];
+                        if (api && !api.isAutoActive()) {
+                            api.startAutoDetached(ctx, pi, process.cwd(), false);
+                        }
+                    }, 1000);
+                } else {
+                    ctx?.ui?.notify?.("[Guardian] 10 retries exhausted. Giving up in manual mode.", "error");
+                }
             }
-        } else if (!isAuto && !event.__guardian_manual_error) {
+        } else if (!isAuto) {
+            // Normal mode successful end
             helper.reset();
         }
     });

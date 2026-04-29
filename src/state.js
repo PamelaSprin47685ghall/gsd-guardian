@@ -1,14 +1,15 @@
 // Guardian Plugin - State Machine
-//
-// Manages retry count, fixing mode, and sleep interruption state.
 
 export function createGuardianState() {
     const state = {
         retryCount: 0,
         isFixingMode: false,
+        isFixingModePending: false,
         isInplaceRetry: false,
         needsSleep: false,
-        cancelSleep: null
+        lastErrorMsg: null,
+        cancelSleep: null,
+        restartTimer: null // 用于打断复活倒计时
     };
 
     async function safeSleep(ms) {
@@ -28,18 +29,14 @@ export function createGuardianState() {
     function reset() {
         state.retryCount = 0;
         state.isFixingMode = false;
+        state.isFixingModePending = false;
         state.isInplaceRetry = false;
         state.needsSleep = false;
+        state.lastErrorMsg = null;
         if (state.cancelSleep) state.cancelSleep();
+        if (state.restartTimer) clearTimeout(state.restartTimer);
+        state.restartTimer = null;
     }
 
-    function getRetryCount() { return state.retryCount; }
-    function isFixing() { return state.isFixingMode; }
-    function isRetrying() { return state.isInplaceRetry; }
-    function isSleeping() { return state.needsSleep; }
-
-    return {
-        state, safeSleep, reset,
-        getRetryCount, isFixing, isRetrying, isSleeping
-    };
+    return { state, safeSleep, reset };
 }
