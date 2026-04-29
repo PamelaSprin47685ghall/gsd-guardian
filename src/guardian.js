@@ -28,33 +28,9 @@ export default function guardianPlugin(pi) {
         patcher.applyAll(helper, ctx);
     });
 
-    // ── 终极防御：同步擦除底层报错，强行引流至产物校验 ──
-    pi.on("turn_end", (event) => {
-        const isAuto = gsdMods?.["auto"]?.isAutoActive() || !!process.env.GSD_PROJECT_ROOT;
-        const session = gsdMods?.["auto-runtime-state"]?.autoSession;
-
-        if (isAuto && session) {
-            // 物理擦除 GSD 记录的工具错误！让 GSD 像瞎子一样往下走
-            session.lastToolInvocationError = null;
-        }
-
-        const msg = event.message;
-        if (msg && msg.stopReason === "error") {
-            msg.__guardian_manual_error = msg.errorMessage || "Unknown execution error";
-            msg.stopReason = "stop"; // 伪装成正常停止，避免 GSD 核心崩溃
-        }
-    });
-
     pi.on("agent_end", async (event, ctx) => {
         await ensureMods(ctx);
         patcher.applyAll(helper, ctx);
-
-        // 双重确保错误已被擦除
-        const isAuto = gsdMods?.["auto"]?.isAutoActive() || !!process.env.GSD_PROJECT_ROOT;
-        if (isAuto) {
-            const session = gsdMods?.["auto-runtime-state"]?.autoSession;
-            if (session) session.lastToolInvocationError = null;
-        }
 
         const lastMsg = event.messages?.[event.messages.length - 1];
         const stopReason = lastMsg?.stopReason;
@@ -63,6 +39,8 @@ export default function guardianPlugin(pi) {
             helper.reset();
             return;
         }
+
+        const isAuto = gsdMods?.["auto"]?.isAutoActive() || !!process.env.GSD_PROJECT_ROOT;
 
         if (helper.state.isFixingMode) {
             helper.state.isFixingMode = false;
@@ -79,7 +57,7 @@ export default function guardianPlugin(pi) {
             return;
         }
 
-        if (lastMsg?.__guardian_manual_error && !isAuto) {
+        if (event.__guardian_manual_error && !isAuto) {
             helper.state.retryCount++;
             if (helper.state.retryCount <= MAX_RETRIES) {
                 const delayMs = Math.min(1000 * Math.pow(2, helper.state.retryCount - 1), 30000);
@@ -88,7 +66,7 @@ export default function guardianPlugin(pi) {
                     await helper.safeSleep(delayMs);
                     pi.sendMessage({
                         customType: "gsd-guardian-retry",
-                        content: `Execution error: ${lastMsg.__guardian_manual_error}\n\nPlease correct your parameters and try exactly the same step again.`,
+                        content: `Execution error: ${event.__guardian_manual_error}\n\nPlease correct your parameters and try exactly the same step again.`,
                         display: false
                     }, { triggerTurn: true, deliverAs: "followUp" });
                 } catch (e) {}
@@ -96,7 +74,7 @@ export default function guardianPlugin(pi) {
                 helper.state.retryCount = 0;
                 ctx?.ui?.notify?.("[Guardian] 10 retries exhausted. Giving up in manual mode.", "error");
             }
-        } else if (!isAuto && !lastMsg?.__guardian_manual_error) {
+        } else if (!isAuto && !event.__guardian_manual_error) {
             helper.reset();
         }
     });
