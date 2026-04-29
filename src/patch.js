@@ -11,7 +11,6 @@ export function createPatcher(pi) {
     let cmdCtxPatched = false;
     let retryMapPatched = false;
     let sendMsgPatched = false;
-    let emitPatched = false;
     let currentCtx = null; 
 
     // ── Patch 1: Hijack AutoSession.cmdCtx.newSession() ──
@@ -85,39 +84,11 @@ export function createPatcher(pi) {
         sendMsgPatched = true;
     }
 
-    // ── Patch 4: Hijack pi.emit ──
-    function patchEmit() {
-        if (emitPatched) return;
-        const origEmit = pi.emit.bind(pi);
-        pi.emit = function (eventName, ...args) {
-            if (eventName === "agent_end") {
-                const event = args[0];
-                const lastMsg = event?.messages?.[event.messages.length - 1];
-                if (lastMsg?.stopReason === "error") {
-                    // 双保险：检查实例状态 或 独有的环境变量
-                    const isAuto = gsdSessionStore?.autoSession?.active || !!process.env.GSD_PROJECT_ROOT;
-                    lastMsg.stopReason = "stop"; 
-
-                    if (isAuto) {
-                        if (gsdSessionStore?.autoSession) {
-                            gsdSessionStore.autoSession.lastToolInvocationError = null;
-                        }
-                    } else {
-                        event.__guardian_manual_error = lastMsg.errorMessage || "Unknown execution error";
-                    }
-                }
-            }
-            return origEmit(eventName, ...args);
-        };
-        emitPatched = true;
-    }
-
     function applyAll(helper, ctx) {
         if (ctx) currentCtx = ctx;
         patchCmdCtx(helper);
         patchRetryMap(helper);
         patchSendMessage(helper);
-        patchEmit();
     }
 
     return { applyAll };
