@@ -8,8 +8,8 @@ export function createGuardianState() {
         isInplaceRetry: false,
         needsSleep: false,
         lastErrorMsg: null,
-        lastErrorReason: null, // 用于捕获业务级校验报错
-        errorOccurredTime: 0,  // 记录报错时间戳
+        lastErrorReason: null, 
+        errorOccurredTime: 0,  
         cancelSleep: null,
         restartTimer: null
     };

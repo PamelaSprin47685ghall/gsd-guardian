@@ -35,6 +35,7 @@ export default function guardianPlugin(pi) {
         const lastMsg = event.messages?.[event.messages.length - 1];
         const stopReason = lastMsg?.stopReason;
 
+        // 用户按 Esc 手动中断
         if (stopReason === "aborted") {
             helper.reset();
             return;
@@ -42,7 +43,7 @@ export default function guardianPlugin(pi) {
 
         const isAuto = gsdMods?.["auto"]?.isAutoActive() || !!process.env.GSD_PROJECT_ROOT;
 
-        // ── LLM 修复回合结束，自动恢复 /gsd auto ──
+        // ── LLM 修复完毕，无缝接续 Auto Mode ──
         if (helper.state.isFixingMode) {
             helper.state.isFixingMode = false;
             helper.state.retryCount = 0;
@@ -52,14 +53,14 @@ export default function guardianPlugin(pi) {
             }
             ctx?.ui?.notify?.("Guardian: LLM self-repair complete. Resuming /gsd auto...", "success");
             const api = gsdMods?.["auto"];
-            // LLM 修好了，帮用户敲入 /gsd auto
+            // 强行把它从沉睡中拉起！
             if (api && !api.isAutoActive()) {
                 api.startAutoDetached(ctx, pi, process.cwd(), false);
             }
             return;
         }
 
-        // ── 底层 Schema / 工具崩溃 ──
+        // ── 处理 Schema 错误引起的崩溃 ──
         if (stopReason === "error") {
             helper.state.retryCount++;
             
@@ -69,7 +70,6 @@ export default function guardianPlugin(pi) {
                 if (isAuto) {
                     helper.state.isInplaceRetry = true;
                     helper.state.needsSleep = true;
-                    // 让 GSD 自然去 pauseAuto，1 秒后将其原地复活
                     helper.state.restartTimer = setTimeout(() => {
                         const api = gsdMods?.["auto"];
                         if (api && !api.isAutoActive()) {
@@ -104,6 +104,7 @@ export default function guardianPlugin(pi) {
                 }
             }
         } else if (!isAuto) {
+            // Manual Mode 正常结束
             helper.reset();
         }
     });

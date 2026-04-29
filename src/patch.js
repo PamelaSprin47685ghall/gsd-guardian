@@ -11,16 +11,13 @@ export function createPatcher(pi) {
     let cmdCtxPatched = false;
     let retryMapPatched = false;
     let sendMsgPatched = false;
-    let uiSessionPatched = false;
     let currentCtx = null;
 
-    // ── Patch 1: Hijack AutoSession.cmdCtx.newSession() ──
     function patchCmdCtx(helper) {
         const ctx = gsdSessionStore?.autoSession?.cmdCtx;
         if (!ctx || cmdCtxPatched) return;
         const orig = ctx.newSession;
         ctx.newSession = async function (opts) {
-            // 原地重试时拦截上下文清理，保留记忆
             if (helper.state.isInplaceRetry) {
                 helper.state.isInplaceRetry = false;
                 return { cancelled: false };
@@ -30,7 +27,6 @@ export function createPatcher(pi) {
         cmdCtxPatched = true;
     }
 
-    // ── Patch 2: Hijack verificationRetryCount Map ──
     function patchRetryMap(helper) {
         const map = gsdSessionStore?.autoSession?.verificationRetryCount;
         if (!map || retryMapPatched) return;
@@ -56,78 +52,62 @@ export function createPatcher(pi) {
         retryMapPatched = true;
     }
 
-    // ── Patch 3: 全局业务错误捕获器 (Universal Error Catcher) ──
-    // 专门捕获 Pre-execution / Content validation 这类导致 Auto Mode 停机的业务错误
-    function patchUIAndSession(helper) {
-        const s = gsdSessionStore?.autoSession;
-        if (!s || !currentCtx || uiSessionPatched) return;
+    // ── Patch 3: 全局业务错误捕获器 (UI 探针模式) ──
+    // 放弃不稳定的属性劫持，直接监控控制台输出的文字！
+    function patchUI(helper) {
+        if (!currentCtx || currentCtx.ui.__guardian_patched) return;
 
-        // 1. 劫持 UI Notify，悄悄记录所有的红色报错文本
-        if (!currentCtx.ui.__guardian_patched) {
-            const origNotify = currentCtx.ui.notify.bind(currentCtx.ui);
-            currentCtx.ui.notify = function(msg, level) {
-                if (typeof msg === "string" && !msg.includes("[Guardian]")) {
-                    if (level === "error" || level === "warning") {
-                        // 聚合同一时间段内的多条报错（比如三个属性校验失败）
-                        if (Date.now() - helper.state.errorOccurredTime < 500) {
-                            helper.state.lastErrorReason += "\n" + msg;
-                        } else {
-                            helper.state.lastErrorReason = msg;
-                        }
-                        helper.state.errorOccurredTime = Date.now();
+        const origNotify = currentCtx.ui.notify.bind(currentCtx.ui);
+        currentCtx.ui.notify = function(msg, level) {
+            if (typeof msg === "string" && !msg.includes("[Guardian]")) {
+                
+                // 1. 记录报错信息
+                if (level === "error" || level === "warning") {
+                    // 如果短时间内连续报错，拼接到一起
+                    if (Date.now() - helper.state.errorOccurredTime < 1000) {
+                        helper.state.lastErrorReason += "\n\n" + msg;
+                    } else {
+                        helper.state.lastErrorReason = msg;
                     }
+                    helper.state.errorOccurredTime = Date.now();
                 }
-                return origNotify(msg, level);
-            };
-            currentCtx.ui.__guardian_patched = true;
-        }
 
-        // 2. 劫持 s.paused，一旦 Auto Mode 停机，且刚刚有报错，立刻切入修复模式！
-        if (!s.__guardian_state_patched) {
-            let realPaused = s.paused;
-            Object.defineProperty(s, "paused", {
-                get: () => realPaused,
-                set: function(val) {
-                    const justPaused = !realPaused && val;
-                    realPaused = val;
-                    if (justPaused) {
-                        // 使用 setTimeout 确保 UI 通知已经全部到达并被记录
-                        setTimeout(() => checkUniversalErrorRecovery(), 100);
-                    }
-                },
-                configurable: true
-            });
-
-            function checkUniversalErrorRecovery() {
-                // 如果正在处理底层的原地重试，不要干预
-                if (helper.state.isInplaceRetry || helper.state.isFixingMode) return;
-
-                const now = Date.now();
-                // 停机前 2.5 秒内有过业务报错？抓到你了！
-                if (helper.state.errorOccurredTime && (now - helper.state.errorOccurredTime < 2500)) {
-                    helper.state.errorOccurredTime = 0;
-                    helper.state.isFixingMode = true; // 直接进入修复模式
-                    helper.state.retryCount = 0;
-
-                    const errorDetails = helper.state.lastErrorReason;
-                    currentCtx.ui.notify(`[Guardian] Business error detected. Handing over to LLM for repair...`, "warning");
-
-                    // 退出 Auto Mode 后，把错误发给 LLM 要求修复 (非原地，享受全新上下文)
-                    setTimeout(() => {
-                        pi.sendMessage({
-                            customType: "gsd-guardian-fix",
-                            content: `**AUTO-MODE PAUSED DUE TO VALIDATION ERROR**\n\nThe system rejected your previous output with the following error:\n\`\`\`\n${errorDetails}\n\`\`\`\n\nPlease deeply analyze the workspace and fix the blocking issues (e.g., missing fields, unmet schema requirements, broken references). Do NOT proceed with the main task yet. I will automatically resume Auto Mode after you finish.`,
-                            display: true
-                        }, { triggerTurn: true, deliverAs: "followUp" });
-                    }, 1500);
+                // 2. 捕捉到 GSD 打印的停机语句
+                if (msg.includes("mode paused") && msg.includes("to resume")) {
+                    // 延迟一点点触发，确保所有 UI 消息都已经打印完
+                    setTimeout(() => checkUniversalErrorRecovery(), 100);
                 }
             }
-            s.__guardian_state_patched = true;
+            return origNotify(msg, level);
+        };
+        currentCtx.ui.__guardian_patched = true;
+
+        function checkUniversalErrorRecovery() {
+            // 如果正在处理 Schema 崩溃的原地重试，不要干预
+            if (helper.state.isInplaceRetry || helper.state.isFixingMode) return;
+
+            const now = Date.now();
+            // 如果停机前 5 秒内有过 Error / Warning 报错，那必然是被它干停的！
+            if (helper.state.errorOccurredTime && (now - helper.state.errorOccurredTime < 5000)) {
+                helper.state.errorOccurredTime = 0;
+                helper.state.isFixingMode = true;
+                helper.state.retryCount = 0;
+
+                const errorDetails = helper.state.lastErrorReason;
+                currentCtx.ui.notify(`[Guardian] Business logic issue detected. Handing over to LLM for repair...`, "warning");
+
+                // 发送修复指令 (用 followUp 完美保留上下文)
+                setTimeout(() => {
+                    pi.sendMessage({
+                        customType: "gsd-guardian-fix",
+                        content: `**AUTO-MODE PAUSED DUE TO VALIDATION ERROR**\n\nThe system rejected your previous output with the following error/warning:\n\`\`\`\n${errorDetails}\n\`\`\`\n\nPlease deeply analyze the workspace and fix the blocking issues (e.g., missing fields, unmet schema requirements, broken references, or warnings). Do NOT proceed with the main task yet. I will automatically resume Auto Mode after you finish.`,
+                        display: true
+                    }, { triggerTurn: true, deliverAs: "followUp" });
+                }, 1500);
+            }
         }
-        uiSessionPatched = true;
     }
 
-    // ── Patch 4: Hijack pi.sendMessage ──
     function patchSendMessage(helper) {
         if (sendMsgPatched) return;
         const orig = pi.sendMessage.bind(pi);
@@ -152,7 +132,6 @@ export function createPatcher(pi) {
                 let finalMsg = msg;
                 let finalOpts = opts;
 
-                // 只有 Schema/崩溃 导致的原地重试才需要覆盖 Prompt，业务修复使用原生流程
                 if (helper.state.isInplaceRetry) {
                     finalOpts = { ...opts, deliverAs: "followUp" };
                     if (helper.state.lastErrorMsg) {
@@ -179,7 +158,7 @@ export function createPatcher(pi) {
         if (ctx) currentCtx = ctx;
         patchCmdCtx(helper);
         patchRetryMap(helper);
-        patchUIAndSession(helper); // 启动全局业务错误捕获器
+        patchUI(helper);
         patchSendMessage(helper);
     }
 
