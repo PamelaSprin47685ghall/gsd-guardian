@@ -11,7 +11,6 @@ export function createPatcher(pi) {
     let cmdCtxPatched = false;
     let retryMapPatched = false;
     let sendMsgPatched = false;
-    let toolErrorPatched = false;
     let currentCtx = null;
 
     // ── Patch 1: Hijack AutoSession.cmdCtx.newSession() ──
@@ -22,6 +21,7 @@ export function createPatcher(pi) {
         ctx.newSession = async function (opts) {
             if (helper.state.isInplaceRetry) {
                 helper.state.isInplaceRetry = false;
+                // 拦截清理，保留历史上下文
                 return { cancelled: false };
             }
             return orig.apply(this, [opts]);
@@ -41,8 +41,10 @@ export function createPatcher(pi) {
             if (helper.state.retryCount <= MAX_RETRIES) {
                 helper.state.isInplaceRetry = true;
                 helper.state.needsSleep = true;
+                // 欺骗 GSD：永远是第 1 次重试
                 return origSet(key, 1);
             }
+            // 10次上限耗尽，接管修复
             helper.state.isFixingMode = true;
             setTimeout(() => {
                 pi.sendMessage({
@@ -75,8 +77,11 @@ export function createPatcher(pi) {
                     "warning"
                 );
 
+                // 强制 GSD 发出的重试 Prompt 作为 FollowUp 追加，绝不替换上下文！
+                const overrideOpts = { ...opts, deliverAs: "followUp" };
+
                 helper.safeSleep(delayMs).then(() => {
-                    orig(msg, opts);
+                    orig(msg, overrideOpts);
                 }).catch(() => {});
                 return;
             }
@@ -85,32 +90,11 @@ export function createPatcher(pi) {
         sendMsgPatched = true;
     }
 
-    // ── Patch 4: 终极杀招 - 属性代理劫持 lastToolInvocationError ──
-    // 强制 GSD 在 Auto Mode 下变成"瞎子"，永远看不到 Schema 或工具错误，逼它重试！
-    function patchToolError(helper) {
-        const s = gsdSessionStore?.autoSession;
-        if (!s || toolErrorPatched) return;
-
-        let realError = s.lastToolInvocationError;
-        Object.defineProperty(s, "lastToolInvocationError", {
-            get: function () {
-                if (this.active) return null;
-                return realError;
-            },
-            set: function (val) {
-                realError = val;
-            },
-            configurable: true
-        });
-        toolErrorPatched = true;
-    }
-
     function applyAll(helper, ctx) {
         if (ctx) currentCtx = ctx;
         patchCmdCtx(helper);
         patchRetryMap(helper);
         patchSendMessage(helper);
-        patchToolError(helper);
     }
 
     return { applyAll };
