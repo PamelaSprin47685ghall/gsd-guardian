@@ -28,7 +28,7 @@ export default function guardianPlugin(pi) {
         patcher.applyAll(helper, ctx);
     });
 
-    // ── 核心防御：提前隐瞒 Schema / 工具报错 ──
+    // ── 核心防御：隐瞒 Schema / 工具报错 ──
     pi.on("turn_end", (event) => {
         const msg = event.message;
         if (msg && msg.stopReason === "error") {
@@ -36,13 +36,10 @@ export default function guardianPlugin(pi) {
             const isAuto = s?.active;
             
             if (isAuto) {
-                // 缓存真实错误供 FollowUp 使用
                 helper.state.hiddenToolError = s.lastToolInvocationError || msg.errorMessage || "Unknown Error";
-                // 瞒天过海，让 GSD 走向产物校验并触发 Map 拦截
                 msg.stopReason = "stop";
                 s.lastToolInvocationError = null; 
             } else {
-                // Manual Mode 打标记
                 event.__guardian_manual_error = msg.errorMessage || "Unknown Error";
             }
         }

@@ -2,13 +2,16 @@
 
 export function createGuardianState() {
     const state = {
-        schemaRetryCount: 0,     // 用于原地重试 (不丢上下文)
-        businessRetryCount: 0,   // 用于业务报错重试 (刷新上下文)
-        isInplaceRetry: false,   // 标记是否要拦截 newSession
-        hiddenToolError: null,   // 缓存被拦截的 Schema 错误
-        pendingBusinessError: null, // 缓存业务报错，等待注入新 Session
+        schemaRetryCount: 0,     
+        businessRetryCount: 0,   
+        isInplaceRetry: false,   
+        hiddenToolError: null,   
+        pendingBusinessError: null, 
         needsSleep: false,
-        cancelSleep: null
+        cancelSleep: null,
+        validCmdCtx: null,       // 缓存真命天子：拥有 newSession 方法的上下文
+        lastErrorReason: null, 
+        errorOccurredTime: 0
     };
 
     async function safeSleep(ms) {
@@ -32,7 +35,10 @@ export function createGuardianState() {
         state.hiddenToolError = null;
         state.pendingBusinessError = null;
         state.needsSleep = false;
+        state.lastErrorReason = null;
+        state.errorOccurredTime = 0;
         if (state.cancelSleep) state.cancelSleep();
+        // validCmdCtx 不重置，以便复活时兜底使用
     }
 
     return { state, safeSleep, reset };
