@@ -1,75 +1,41 @@
-# gsd-guardian
+# GSD Guardian
 
-GSD Guardian - Intelligent retry and self-repair system for GSD auto-mode.
+**Time-Freeze Auto-Recovery for GSD Auto Mode**
 
-## Features
+利用 Pi Core 的 `ctx.absorb()` 两阶段事件拦截实现**绝对不丢上下文的原地重试**。
 
-- **Smart Retry**: Exponential backoff retry for transient failures
-- **Context Preservation**: In-place retry without clearing LLM context
-- **Self-Repair Loop**: Automatically hands off to LLM for complex issues
-- **Auto-Resume**: Seamlessly resumes auto-mode after LLM fixes the problem
-- **Cross-Platform**: Works with npm global, nvm, and local installations
+## 文件结构
 
-## Installation
-
-```bash
-npm install -g gsd-guardian
+```
+index.js                 # 入口（9 行）
+src/
+  state.js               # 内部状态机：retry/repair 计数、sleep/abort
+  probe.js               # 动态探测 isAutoModeRunning
+  agent-end.js           # agent_end 拦截核心：absorb + 三阶段重试/修复
+  session-hijack.js      # before_agent_start 劫持 newSession 保护上下文
+test/
+  guardian.test.mjs      # 单元测试
 ```
 
-Or link locally for development:
+## 原理
 
-```bash
-npm link
+```
+agent_end (stopReason: "error")
+  → negotiate: ctx.absorb("extensions/gsd")    ← GSD 被没收，autoLoop 挂起
+  → execute:   pi.sendUserMessage(errorText)    ← LLM 在原上下文看到错误
+  → LLM 修复成功 → 不 absorb → GSD 收到正常事件 → 以为是第一次成功
+  → LLM 再错    → 再 absorb → sendUserMessage → 循环
 ```
 
-## Usage
+## 行为
 
-The plugin activates automatically when GSD is running. No manual configuration needed.
+| 条件 | 动作 |
+|---|---|
+| 1–10 次错误 | 指数退避 (1s–30s) 原地重试，Esc 取消 |
+| 10 次耗尽 (auto-mode) | `/gsd pause` → LLM 修复回合 → 自动恢复 |
+| 10 次耗尽 (非 auto) | 放弃 |
+| 修复回合失败 >5 次 | 彻底停止 |
 
-### Troubleshooting
+## 依赖
 
-If the plugin can't find GSD modules, enable debug mode:
-
-```bash
-GUARDIAN_DEBUG=1 pi
-```
-
-This will show all searched paths and help diagnose installation issues.
-
-### Supported Installation Methods
-
-- npm global install (`npm install -g gsd-pi`)
-- nvm managed Node.js versions
-- Local development setup
-- Custom paths via `GSD_CODING_AGENT_DIR` or `GSD_PKG_ROOT` environment variables
-
-## How It Works
-
-1. **Schema/Tool Errors**: Retries in-place up to 10 times with exponential backoff
-2. **Business Errors**: Detects validation failures, pauses auto-mode, and asks LLM to fix
-3. **Auto-Resume**: After LLM completes the fix, automatically restarts `/gsd auto`
-
-## Architecture
-
-The plugin is organized into focused modules:
-
-- **discovery.js**: Dynamic module loading - locates and loads GSD's internal `auto` and `auto-runtime-state` modules at runtime via realpath-resolved ESM import. Searches multiple common installation paths.
-- **state.js**: State management - maintains retry count, fixing mode flags, context caching, and sleep interruption state
-- **patch.js**: Runtime monkey-patching - hijacks `AutoSession.cmdCtx.newSession()`, `verificationRetryCount` Map, `ui.notify()`, and `pi.sendMessage()` for in-place retry, business error detection, and exponential backoff
-- **guardian.js**: Main coordinator - orchestrates module loading, patching, event interception, and the complete LLM self-repair loop
-
-### Key Features
-
-- **In-Place Retry**: Hijacks `cmdCtx.newSession()` to suppress new session creation during retries, keeping full context
-- **Turn-End Error Masking**: Listens on `turn_end` to mutate `msg.stopReason` from `"error"` to `"stop"` before `agent_end` fires—both events share the same message object by JavaScript reference
-- **Business Error Detection**: Intercepts `ui.notify()` to capture validation errors and GSD pause signals, triggering LLM repair mode
-- **Exponential Backoff**: Implements safe sleep with interruption support (1s, 2s, 4s... max 30s)
-- **LLM Self-Healing**: After 10 consecutive failures or business validation errors, sends a critical fix prompt requesting the LLM to diagnose and repair the workspace
-- **Auto-Resume**: Monitors `agent_end` to detect when LLM completes repair, then automatically calls `startAutoDetached()` to resume auto-mode
-- **Context Caching**: Preserves valid `cmdCtx` references to ensure robust recovery even if original context becomes stale
-- **Manual Mode Error Recovery**: Detects errors in manual mode via `turn_end`-stamped `__manual_error` and triggers automatic retry prompts
-- **FollowUp Messages**: Uses Pi's `deliverAs: "followUp"` to append retry prompts without losing context
-
-## License
-
-MIT
+- Pi Core >=2.29.0（提供 `ctx.absorb()` 两阶段扩展运行器）

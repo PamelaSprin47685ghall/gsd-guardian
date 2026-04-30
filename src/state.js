@@ -1,42 +1,30 @@
-// Guardian Plugin - State Machine
+export const state = {
+  retryCount: 0,
+  repairCount: 0,
+  isFixing: false,
+  suppressNextNewSession: false,
+  timer: null,
+  rejecter: null,
+};
 
-export function createGuardianState() {
-    const state = {
-        retryCount: 0,
-        isFixingMode: false,
-        isFixingModePending: false,
-        isInplaceRetry: false,
-        needsSleep: false,
-        schemaErrorMsg: null,
-        lastBusinessError: null,
-        validCmdCtx: null, // 缓存含有 newSession 的上下文
-        cancelSleep: null
-    };
+export function abort() {
+  if (state.timer) clearTimeout(state.timer);
+  if (state.rejecter) state.rejecter(new Error("User Aborted"));
+  state.timer = null;
+  state.rejecter = null;
+  state.retryCount = 0;
+  state.repairCount = 0;
+  state.isFixing = false;
+  state.suppressNextNewSession = false;
+}
 
-    async function safeSleep(ms) {
-        return new Promise((resolve, reject) => {
-            const timer = setTimeout(() => {
-                state.cancelSleep = null;
-                resolve();
-            }, ms);
-            state.cancelSleep = () => {
-                clearTimeout(timer);
-                state.cancelSleep = null;
-                reject(new Error("User Aborted"));
-            };
-        });
-    }
-
-    function reset() {
-        state.retryCount = 0;
-        state.isFixingMode = false;
-        state.isFixingModePending = false;
-        state.isInplaceRetry = false;
-        state.needsSleep = false;
-        state.schemaErrorMsg = null;
-        state.lastBusinessError = null;
-        if (state.cancelSleep) state.cancelSleep();
-    }
-
-    return { state, safeSleep, reset };
+export function sleep(ms) {
+  return new Promise((resolve, reject) => {
+    state.rejecter = reject;
+    state.timer = setTimeout(() => {
+      state.timer = null;
+      state.rejecter = null;
+      resolve();
+    }, ms);
+  });
 }
