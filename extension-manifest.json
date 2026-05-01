@@ -1,13 +1,13 @@
 {
   "id": "guardian",
   "name": "Guardian Auto-Recovery Plugin",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Enhances auto mode with ctx.absorb()-based time freeze, exponential backoff in-place retries, and LLM-assisted repair handoff — all without context loss.",
   "tier": "community",
   "requires": {
     "platform": ">=2.29.0"
   },
   "provides": {
-    "hooks": ["before_agent_start", "agent_end", "stop"]
+    "hooks": ["agent_end", "stop"]
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "gsd-guardian",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Guardian plugin for GSD auto-mode error recovery (absorb-based time freeze)",
   "type": "module",
   "exports": "./index.js",

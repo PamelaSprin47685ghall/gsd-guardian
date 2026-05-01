@@ -2,20 +2,28 @@ export const state = {
   retryCount: 0,
   repairCount: 0,
   isFixing: false,
-  suppressNextNewSession: false,
+  repairExhaustedThisTurn: false,
   timer: null,
   rejecter: null,
 };
 
-export function abort() {
+// Cancel sleep only — does not reset recovery counters.
+// Called by stop hook on user Esc/Ctrl+C.
+export function cancelSleepOnly() {
   if (state.timer) clearTimeout(state.timer);
   if (state.rejecter) state.rejecter(new Error("User Aborted"));
   state.timer = null;
   state.rejecter = null;
+}
+
+// Full reset of Guardian recovery state.
+// Called at repair exhaustion (handler consumes repairExhaustedThisTurn).
+// Never called from stop hook — recovery counters must survive normal agent_end cycles.
+export function resetRecoveryState() {
   state.retryCount = 0;
   state.repairCount = 0;
   state.isFixing = false;
-  state.suppressNextNewSession = false;
+  state.repairExhaustedThisTurn = false;
 }
 
 export function sleep(ms) {

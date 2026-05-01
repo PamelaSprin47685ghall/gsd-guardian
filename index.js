@@ -1,9 +1,16 @@
 import { createAgentEndHandler } from "./src/agent-end.js";
-import { createSessionHijack } from "./src/session-hijack.js";
-import { abort } from "./src/state.js";
+import { cancelSleepOnly, resetRecoveryState } from "./src/state.js";
 
 export default function guardianPlugin(pi) {
-  pi.on("before_agent_start", createSessionHijack(pi));
   pi.on("agent_end", createAgentEndHandler(pi));
-  pi.on("stop", () => abort());
+
+  // Only intervene on user-initiated cancellation (Esc/Ctrl+C).
+  // Cancel sleep + reset Guardian recovery state so a fresh
+  // /gsd auto starts with clean counters.
+  pi.on("stop", (event) => {
+    if (event?.reason === "cancelled") {
+      cancelSleepOnly();
+      resetRecoveryState();
+    }
+  });
 }
