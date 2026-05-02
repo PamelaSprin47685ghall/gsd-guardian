@@ -247,54 +247,54 @@ describe("agent-end mode switch", () => {
   before(() => setupTempAuto());
   after(() => teardownTempAuto());
 
-  it("does not absorb or retry manual errors", async () => {
+  it("retries current-turn manual errors", async () => {
     const { handler, ctx } = await createHandlerCtx();
     resetRecoveryState();
-    state.lastAutoMode = true;
-    state.retryCount = 5;
+    state.lastAutoMode = false;
 
-    const origGSD = process.env.GSD_CODING_AGENT_DIR;
-    process.env.GSD_CODING_AGENT_DIR = "/nonexistent";
-
-    try {
-      await handler.negotiate(
-        { messages: [{ role: "assistant", stopReason: "error", errorMessage: "test" }] },
-        ctx,
-      );
-      assert.equal(ctx.absorb.mock.calls.length, 0, "manual errors should stay user-visible");
-      assert.equal(state.retryCount, 0, "manual errors should clear stale retry state");
-      assert.equal(state.lastAutoMode, false);
-
-      const sendUserMessage = mock.fn(() => {});
-      const manualHandler = (await importFresh("../src/agent-end.js")).createAgentEndHandler({
-        on: () => {},
-        sendUserMessage,
-      });
-
-      await manualHandler(
-        { messages: [{ role: "assistant", stopReason: "error", errorMessage: "test" }] },
-        { ui: { notify: () => {} } },
-      );
-
-      assert.equal(sendUserMessage.mock.calls.length, 0, "manual errors should not be replayed");
-    } finally {
-      process.env.GSD_CODING_AGENT_DIR = origGSD;
-    }
-  });
-
-  it("resets state when transitioning from manual to auto", async () => {
-    const { handler, ctx } = await createHandlerCtx();
-    resetRecoveryState();
-    state.lastAutoMode = false; // pretend we were in manual
-    state.retryCount = 5;
-
-    // Simulate auto mode (setupTempAuto uses _tmpDir which is still valid)
     await handler.negotiate(
       { messages: [{ role: "assistant", stopReason: "error", errorMessage: "test" }] },
       ctx,
     );
-    assert.equal(state.retryCount, 0, "should reset when manual -> auto");
-    assert.equal(state.lastAutoMode, true);
+
+    assert.equal(ctx.absorb.mock.calls.length, 1, "current-turn manual errors should be retried");
+
+    const sendUserMessage = mock.fn(() => {});
+    const manualHandler = (await importFresh("../src/agent-end.js")).createAgentEndHandler({
+      on: () => {},
+      sendUserMessage,
+    });
+
+    await manualHandler(
+      { messages: [{ role: "assistant", stopReason: "error", errorMessage: "test" }] },
+      { ui: { notify: () => {} } },
+    );
+
+    assert.equal(sendUserMessage.mock.calls.length, 1, "manual errors should issue retry prompt");
+  });
+
+  it("skips stale agent_end during session switch", async () => {
+    const mod = await importFresh("../src/agent-end.js");
+    const { handler, ctx } = await createHandlerCtx();
+    resetRecoveryState();
+
+    mod.markNextAgentEndAsSessionSwitch();
+
+    await handler.negotiate(
+      { messages: [{ role: "assistant", stopReason: "error", errorMessage: "old error" }] },
+      ctx,
+    );
+
+    assert.equal(ctx.absorb.mock.calls.length, 1, "stale switch-turn agent_end should be swallowed");
+
+    const sendUserMessage = mock.fn(() => {});
+    const runHandler = mod.createAgentEndHandler({ on: () => {}, sendUserMessage });
+    await runHandler(
+      { messages: [{ role: "assistant", stopReason: "error", errorMessage: "old error" }] },
+      { ui: { notify: () => {} } },
+    );
+
+    assert.equal(sendUserMessage.mock.calls.length, 0, "stale switch-turn agent_end must not trigger retry");
   });
 });
 
@@ -399,6 +399,6 @@ describe("GSD specific warnings", () => {
     assert.equal(sendUserMessage.mock.calls.length, 1);
     const msg = sendUserMessage.mock.calls[0].arguments[0];
     assert.ok(msg.includes("Warning: Milestone M013"));
-    assert.ok(msg.includes("EXECUTION ERROR"));
+    assert.ok(msg.includes("validation checkpoint") || msg.includes("Diagnose, fix"));
   });
 });

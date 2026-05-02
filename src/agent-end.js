@@ -1,6 +1,7 @@
 import { state, sleep, resetRecoveryState } from "./state.js";
 import { isAutoModeRunning } from "./probe.js";
 import { clearLastToolInvocationError } from "./clear-tool-error.js";
+import { resumePausedAuto } from "./resume-auto.js";
 
 const RETRY_MAX = 10;
 const REPAIR_MAX = 5;
@@ -11,8 +12,8 @@ function formatError(text) {
   return `\`\`\`\n${text}\n\`\`\``;
 }
 
-function isGsdValidationWarning(lastMsg) {
-  let text = lastMsg?.errorMessage || lastMsg?.content || "";
+export function isGsdValidationWarning(message) {
+  let text = message?.errorMessage || message?.content || message?.message || "";
   if (Array.isArray(text)) {
     text = text.map(part => part?.text || (typeof part === "string" ? part : "")).join("");
   }
@@ -26,104 +27,123 @@ function isGsdValidationWarning(lastMsg) {
   );
 }
 
-function isErrorTurn(lastMsg, event) {
-  // Check last message
-  if (lastMsg?.stopReason === "error" || isGsdValidationWarning(lastMsg)) return true;
-
-  // Check any message in the current turn for the warning
-  if (event?.messages?.some(m => isGsdValidationWarning(m))) return true;
-
-  return false;
+function hasGsdValidationWarning(lastMsg, event) {
+  return isGsdValidationWarning(lastMsg) || !!event?.messages?.some(isGsdValidationWarning);
 }
 
-/**
- * Absorb filter: only match GSD's extension handlers at
- * `extensions/gsd/...`, NOT `extensions/gsd-guardian/...`.
- */
+function isErrorTurn(lastMsg, event) {
+  return lastMsg?.stopReason === "error" || hasGsdValidationWarning(lastMsg, event);
+}
+
+function getErrorText(lastMsg, event) {
+  if (lastMsg?.errorMessage) return lastMsg.errorMessage;
+  if (isGsdValidationWarning(lastMsg)) return lastMsg.content || lastMsg.message;
+  const warning = event?.messages?.find(isGsdValidationWarning);
+  return warning?.errorMessage || warning?.content || warning?.message || "Unknown Schema or API Error";
+}
+
 const isGsdExtension = (extPath) =>
   extPath.includes("extensions") && (extPath.includes("/gsd/") || extPath.endsWith("/gsd"));
 
-export function createAgentEndHandler(pi) {
-  // ── Handler (Pass 2) ──────────────────────────────────────────────────
-  const handler = async (event, ctx) => {
-    const lastMsg = event.messages?.at(-1);
-    if (lastMsg?.stopReason === "aborted" && !isGsdValidationWarning(lastMsg))
-      return;
+function startRepair(pi, ctx, errorText, { resumeAutoAfterRepair }) {
+  state.isFixing = true;
+  state.resumeAutoAfterRepair = resumeAutoAfterRepair;
+  state.retryCount = 0;
+  state.repairCount = 0;
 
-    // Phase 0 — repair exhaustion: consume flag. State is already clean
-    // (negotiate reset it).
+  ctx.ui.notify(
+    resumeAutoAfterRepair
+      ? "🔥 [Guardian] GSD validation checkpoint detected. Starting repair before auto resume."
+      : "🔥 10 retries exhausted. Entering LLM repair mode...",
+    "error",
+  );
+
+  pi.sendUserMessage(
+    `${resumeAutoAfterRepair ? "Auto-mode paused at a recoverable GSD validation checkpoint." : "Auto-mode paused after 10 consecutive failures."}\n\nError:\n${formatError(errorText)}\n\nDiagnose, fix, and reply. I will ${resumeAutoAfterRepair ? "resume auto-mode after the fix" : "continue the blocked step after the fix"}.`,
+  );
+}
+
+async function finishRepair(pi, ctx) {
+  const shouldResumeAuto = state.resumeAutoAfterRepair;
+  resetRecoveryState();
+
+  ctx.ui.notify("✅ [Guardian] LLM repair done.", "success");
+  if (!shouldResumeAuto) return;
+
+  const result = await resumePausedAuto(pi, ctx);
+  if (result === "resumed" || result === "already-active") {
+    ctx.ui.notify("▶️ [Guardian] Auto-mode resumed after repair.", "success");
+    return;
+  }
+
+  ctx.ui.notify(
+    `[Guardian] Repair completed, but auto-mode was not resumable (${result}). Run /gsd auto to resume manually.`,
+    "warning",
+  );
+}
+
+export function markNextAgentEndAsSessionSwitch() {
+  state.skipNextAgentEnd = true;
+}
+
+export function createAgentEndHandler(pi) {
+  const handler = async (event, ctx) => {
+    if (state.skippingAgentEndThisTurn) {
+      state.skippingAgentEndThisTurn = false;
+      return;
+    }
+
+    const lastMsg = event.messages?.at(-1);
+    const hasValidationWarning = hasGsdValidationWarning(lastMsg, event);
+    if (lastMsg?.stopReason === "aborted" && !hasValidationWarning) return;
+
     if (state.repairExhaustedThisTurn) {
       state.repairExhaustedThisTurn = false;
-      ctx.ui.notify(
-        "💀 [Guardian] Repair exhausted. GSD handling final failure.",
-        "error",
-      );
+      ctx.ui.notify("💀 [Guardian] Repair exhausted. GSD handling final failure.", "error");
       return;
     }
 
     const isAuto = await isAutoModeRunning();
-    if (!isAuto) {
-      resetRecoveryState();
-      state.lastAutoMode = false;
-      return;
-    }
     if (state.lastAutoMode !== null && state.lastAutoMode !== isAuto) {
-      resetRecoveryState();
+      state.retryCount = 0;
     }
     state.lastAutoMode = isAuto;
 
     const isError = isErrorTurn(lastMsg, event);
-    const errorText =
-      lastMsg?.errorMessage ||
-      (isGsdValidationWarning(lastMsg) ? lastMsg?.content : null) ||
-      "Unknown Schema or API Error";
+    const errorText = getErrorText(lastMsg, event);
 
-    // Phase A — repair mode
     if (state.isFixing) {
       if (!isError) {
-        // Repair success — GSD will resolve the unit
-        // State already cleared in negotiate
-        ctx.ui.notify("✅ [Guardian] LLM repair done.", "success");
+        await finishRepair(pi, ctx);
         return;
       }
 
-      // repairCount already incremented in negotiate (Pass 1)
       if (state.repairCount >= REPAIR_MAX) {
-        ctx.ui.notify(
-          "💀 [Guardian] Repair failed. Halting.",
-          "error",
-        );
+        ctx.ui.notify("💀 [Guardian] Repair failed. Halting.", "error");
+        resetRecoveryState();
         return;
       }
 
-      ctx.ui.notify(
-        `❌ [Guardian] Repair turn ${state.repairCount}/${REPAIR_MAX} failed.`,
-        "warning",
-      );
-      pi.sendUserMessage(
-        `Repair failed:\n${formatError(errorText)}\nFix this and continue.`,
-      );
+      ctx.ui.notify(`❌ [Guardian] Repair turn ${state.repairCount}/${REPAIR_MAX} failed.`, "warning");
+      pi.sendUserMessage(`Repair failed:\n${formatError(errorText)}\nFix this and continue.`);
       return;
     }
 
-    // Phase B — normal success: reset counter
     if (!isError) {
       state.retryCount = 0;
       return;
     }
 
-    // Phase C — error: in-place retry with exponential backoff
+    if (hasValidationWarning) {
+      startRepair(pi, ctx, errorText, { resumeAutoAfterRepair: true });
+      return;
+    }
+
     state.retryCount++;
     if (state.retryCount <= RETRY_MAX) {
-      const delayMs = Math.min(
-        BACKOFF_MS * Math.pow(2, state.retryCount - 1),
-        BACKOFF_MAX_MS,
-      );
+      const delayMs = Math.min(BACKOFF_MS * Math.pow(2, state.retryCount - 1), BACKOFF_MAX_MS);
 
-      ctx.ui.notify(
-        `⚠️ [Guardian] Error: ${errorText.slice(0, 150)}...`,
-        "error",
-      );
+      ctx.ui.notify(`⚠️ [Guardian] Error: ${errorText.slice(0, 150)}...`, "error");
       ctx.ui.notify(
         `⏳ Retry ${state.retryCount}/${RETRY_MAX} in ${(delayMs / 1000).toFixed(1)}s (Esc=cancel)`,
         "warning",
@@ -132,17 +152,12 @@ export function createAgentEndHandler(pi) {
       try {
         await sleep(delayMs);
       } catch {
-        // sleep was cancelled by stop hook (Esc/Ctrl+C)
         ctx.ui.notify("🛑 [Guardian] Retry cancelled.", "warning");
         return;
       }
 
-      // If we were in auto-mode and it was stopped during sleep, abort retry.
       if (isAuto && !(await isAutoModeRunning())) {
-        ctx.ui.notify(
-          "⏹️ [Guardian] Auto-mode stopped during backoff.",
-          "warning",
-        );
+        ctx.ui.notify("⏹️ [Guardian] Auto-mode stopped during backoff.", "warning");
         return;
       }
 
@@ -153,83 +168,66 @@ export function createAgentEndHandler(pi) {
       return;
     }
 
-    // Retries exhausted → enter repair mode
-    // No /gsd pause — absorb keeps autoLoop blocked on unitPromise.
-    // No /gsd auto — LLM repair runs in the same session.
-    state.isFixing = true;
-    state.retryCount = 0;
-    ctx.ui.notify(
-      "🔥 10 retries exhausted. Entering LLM repair mode...",
-      "error",
-    );
-
-    const pausedMsg = isAuto
-      ? "Auto-mode paused after 10 consecutive failures."
-      : "Guardian intervention: 10 consecutive failures reached.";
-    const resumeMsg = isAuto
-      ? "Diagnose, fix, and reply. I will resume auto-mode after."
-      : "Diagnose, fix, and reply.";
-
-    pi.sendUserMessage(
-      `${pausedMsg}\n\nError:\n${formatError(errorText)}\n\n${resumeMsg}`,
-    );
-  };
-
-  // ── Negotiate (Pass 1) ────────────────────────────────────────────────
-  handler.negotiate = async (event, ctx) => {
-    const lastMsg = event.messages?.at(-1);
-
-    if (lastMsg?.stopReason === "aborted" && !isGsdValidationWarning(lastMsg))
-      return;
-
-    const isAuto = await isAutoModeRunning();
     if (!isAuto) {
+      ctx.ui.notify("💀 [Guardian] Manual retry budget exhausted. Returning control to user.", "error");
       resetRecoveryState();
-      state.lastAutoMode = false;
       return;
     }
+
+    startRepair(pi, ctx, errorText, { resumeAutoAfterRepair: false });
+  };
+
+  handler.negotiate = async (event, ctx) => {
+    if (state.skipNextAgentEnd) {
+      state.skipNextAgentEnd = false;
+      state.skippingAgentEndThisTurn = true;
+      state.retryCount = 0;
+      state.repairCount = 0;
+      state.isFixing = false;
+      state.resumeAutoAfterRepair = false;
+      state.repairExhaustedThisTurn = false;
+      ctx.absorb?.(isGsdExtension);
+      return;
+    }
+
+    const lastMsg = event.messages?.at(-1);
+    const hasValidationWarning = hasGsdValidationWarning(lastMsg, event);
+    if (lastMsg?.stopReason === "aborted" && !hasValidationWarning) return;
+
+    const isAuto = await isAutoModeRunning();
     if (state.lastAutoMode !== null && state.lastAutoMode !== isAuto) {
-      resetRecoveryState();
+      state.retryCount = 0;
     }
     state.lastAutoMode = isAuto;
 
     if (!isErrorTurn(lastMsg, event)) {
-      // Success + Guardian was recovering → clean both GSD diagnostic
-      // state and Guardian state BEFORE GSD's handler runs in Pass 2.
-      // This ensures that when resolveAgentEnd() fires, no stale
-      // retryCount / isFixing pollutes subsequent auto units.
       if (state.retryCount > 0 || state.isFixing) {
         const cleared = await clearLastToolInvocationError();
         if (!cleared) {
-          ctx.ui.notify?.(
-            "[Guardian] Could not clear GSD lastToolInvocationError.",
-            "warning",
-          );
+          ctx.ui.notify?.("[Guardian] Could not clear GSD lastToolInvocationError.", "warning");
         }
-        resetRecoveryState();
       }
-      return; // Don't absorb — GSD must process success
+
+      if (!state.isFixing || !state.resumeAutoAfterRepair) {
+        state.retryCount = 0;
+        return;
+      }
+      ctx.absorb?.(isGsdExtension);
+      return;
     }
 
-    // Error + in repair mode
-    // repairCount is incremented here (Pass 1) so the absorb
-    // decision is based on the correct count.
     if (state.isFixing) {
       state.repairCount++;
       if (state.repairCount >= REPAIR_MAX) {
-        // Repair exhausted — reset state immediately in Pass 1,
-        // then set flag so handler can short-circuit and GSD
-        // handles the final error.
         state.repairExhaustedThisTurn = true;
         state.retryCount = 0;
         state.repairCount = 0;
         state.isFixing = false;
-        return; // Don't absorb
+        state.resumeAutoAfterRepair = false;
+        return;
       }
     }
 
-    // Absorb GSD's agent_end handler → resolveAgentEnd() not called
-    // → autoLoop stays blocked on current unitPromise
     ctx.absorb?.(isGsdExtension);
   };
 

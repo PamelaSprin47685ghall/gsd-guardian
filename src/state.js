@@ -2,7 +2,10 @@ export const state = {
   retryCount: 0,
   repairCount: 0,
   isFixing: false,
+  resumeAutoAfterRepair: false,
   repairExhaustedThisTurn: false,
+  skipNextAgentEnd: false,
+  skippingAgentEndThisTurn: false,
   timer: null,
   rejecter: null,
   lastAutoMode: null, // Track last seen auto-mode state
@@ -24,7 +27,10 @@ export function resetRecoveryState() {
   state.retryCount = 0;
   state.repairCount = 0;
   state.isFixing = false;
+  state.resumeAutoAfterRepair = false;
   state.repairExhaustedThisTurn = false;
+  state.skipNextAgentEnd = false;
+  state.skippingAgentEndThisTurn = false;
 }
 
 export function sleep(ms) {
