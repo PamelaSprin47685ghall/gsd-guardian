@@ -1,7 +1,6 @@
 import { state, sleep, resetRecoveryState } from "./state.js";
 import { isAutoModeRunning } from "./probe.js";
 import { clearLastToolInvocationError } from "./clear-tool-error.js";
-import { resumePausedAuto } from "./resume-auto.js";
 import { extractText } from "./extract-text.js";
 import { isUserCancellation } from "./user-cancellation.js";
 import { shouldRecover } from "./should-recover.js";
@@ -64,16 +63,9 @@ async function finishRepair(pi, ctx) {
   ctx.ui.notify("✅ [Guardian] Repair done.", "success");
   if (!shouldResumeAuto) return;
 
-  const result = await resumePausedAuto(pi, ctx);
-  if (result === "resumed" || result === "already-active") {
-    ctx.ui.notify("▶️ [Guardian] Auto-mode resumed.", "success");
-    return;
-  }
-
-  ctx.ui.notify(
-    `[Guardian] Repair completed, but auto-mode was not resumable (${result}). Run /gsd auto to resume manually.`,
-    "warning",
-  );
+  // Simulate user typing /gsd auto to resume
+  ctx.ui.notify("▶️ [Guardian] Auto-mode resumed.", "success");
+  pi.sendUserMessage("/gsd auto");
 }
 
 export function markNextAgentEndAsSessionSwitch() {
