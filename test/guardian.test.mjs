@@ -58,6 +58,7 @@ describe("state machine", () => {
     assert.equal(state.repairExhaustedThisTurn, false);
     assert.equal(state.timer, null);
     assert.equal(state.rejecter, null);
+    assert.equal(state.lastAutoMode, null);
   });
 
   it("sleep resolves after ms", async () => {
@@ -238,6 +239,49 @@ describe("clear-tool-error module", () => {
       process.env.GSD_CODING_AGENT_DIR = origGSD;
       process.env.HOME = origHome;
     }
+  });
+});
+
+// ── Mode Switch ─────────────────────────────────────────────────────────
+describe("agent-end mode switch", () => {
+  before(() => setupTempAuto());
+  after(() => teardownTempAuto());
+
+  it("resets state when transitioning from auto to manual", async () => {
+    const { handler, ctx } = await createHandlerCtx();
+    resetRecoveryState();
+    state.lastAutoMode = true; // pretend we were in auto
+    state.retryCount = 5;
+
+    // Simulate manual mode by making probe return false
+    const origGSD = process.env.GSD_CODING_AGENT_DIR;
+    process.env.GSD_CODING_AGENT_DIR = "/nonexistent";
+
+    try {
+      await handler.negotiate(
+        { messages: [{ role: "assistant", stopReason: "error", errorMessage: "test" }] },
+        ctx,
+      );
+      assert.equal(state.retryCount, 0, "should reset when auto -> manual");
+      assert.equal(state.lastAutoMode, false);
+    } finally {
+      process.env.GSD_CODING_AGENT_DIR = origGSD;
+    }
+  });
+
+  it("resets state when transitioning from manual to auto", async () => {
+    const { handler, ctx } = await createHandlerCtx();
+    resetRecoveryState();
+    state.lastAutoMode = false; // pretend we were in manual
+    state.retryCount = 5;
+
+    // Simulate auto mode (setupTempAuto uses _tmpDir which is still valid)
+    await handler.negotiate(
+      { messages: [{ role: "assistant", stopReason: "error", errorMessage: "test" }] },
+      ctx,
+    );
+    assert.equal(state.retryCount, 0, "should reset when manual -> auto");
+    assert.equal(state.lastAutoMode, true);
   });
 });
 

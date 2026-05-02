@@ -29,8 +29,7 @@ export function createAgentEndHandler(pi) {
     if (lastMsg?.stopReason === "aborted") return;
 
     // Phase 0 — repair exhaustion: consume flag. State is already clean
-    // (negotiate reset it). Must run before guardAutoMode because GSD's
-    // handler may pauseAuto during Pass 2, making isAutoModeRunning false.
+    // (negotiate reset it).
     if (state.repairExhaustedThisTurn) {
       state.repairExhaustedThisTurn = false;
       ctx.ui.notify(
@@ -40,7 +39,11 @@ export function createAgentEndHandler(pi) {
       return;
     }
 
-    if (!(await isAutoModeRunning())) return;
+    const isAuto = await isAutoModeRunning();
+    if (state.lastAutoMode !== null && state.lastAutoMode !== isAuto) {
+      resetRecoveryState();
+    }
+    state.lastAutoMode = isAuto;
 
     const isError = isErrorTurn(lastMsg);
     const errorText = lastMsg?.errorMessage || "Unknown Schema or API Error";
@@ -104,8 +107,8 @@ export function createAgentEndHandler(pi) {
         return;
       }
 
-      // Auto-mode may have been stopped during sleep (e.g. via Esc)
-      if (!(await isAutoModeRunning())) {
+      // If we were in auto-mode and it was stopped during sleep, abort retry.
+      if (isAuto && !(await isAutoModeRunning())) {
         ctx.ui.notify(
           "⏹️ [Guardian] Auto-mode stopped during backoff.",
           "warning",
@@ -129,8 +132,16 @@ export function createAgentEndHandler(pi) {
       "🔥 10 retries exhausted. Entering LLM repair mode...",
       "error",
     );
+
+    const pausedMsg = isAuto
+      ? "Auto-mode paused after 10 consecutive failures."
+      : "Guardian intervention: 10 consecutive failures reached.";
+    const resumeMsg = isAuto
+      ? "Diagnose, fix, and reply. I will resume auto-mode after."
+      : "Diagnose, fix, and reply.";
+
     pi.sendUserMessage(
-      `Auto-mode paused after 10 consecutive failures.\n\nError:\n${formatError(errorText)}\n\nDiagnose, fix, and reply. I will resume auto-mode after.`,
+      `${pausedMsg}\n\nError:\n${formatError(errorText)}\n\n${resumeMsg}`,
     );
   };
 
@@ -138,7 +149,12 @@ export function createAgentEndHandler(pi) {
   handler.negotiate = async (event, ctx) => {
     const lastMsg = event.messages?.at(-1);
     if (lastMsg?.stopReason === "aborted") return;
-    if (!(await isAutoModeRunning())) return;
+
+    const isAuto = await isAutoModeRunning();
+    if (state.lastAutoMode !== null && state.lastAutoMode !== isAuto) {
+      resetRecoveryState();
+    }
+    state.lastAutoMode = isAuto;
 
     if (!isErrorTurn(lastMsg)) {
       // Success + Guardian was recovering → clean both GSD diagnostic

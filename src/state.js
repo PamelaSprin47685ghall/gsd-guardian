@@ -5,6 +5,7 @@ export const state = {
   repairExhaustedThisTurn: false,
   timer: null,
   rejecter: null,
+  lastAutoMode: null, // Track last seen auto-mode state
 };
 
 // Cancel sleep only — does not reset recovery counters.
