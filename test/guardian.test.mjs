@@ -112,6 +112,36 @@ describe("agent-end handler factory", () => {
   });
 });
 
+describe("agent-end repair completion semantics", () => {
+  before(() => setupTempAuto());
+  after(() => teardownTempAuto());
+
+  it("does NOT announce resumed or send /gsd auto when auto is already active", async () => {
+    const mod = await importFresh("../src/agent-end.js");
+    const sendUserMessage = mock.fn(() => {});
+    const notify = mock.fn(() => {});
+    const handler = mod.createAgentEndHandler({ on: () => {}, sendUserMessage });
+
+    resetRecoveryState();
+    state.isFixing = true;
+    state.resumeAutoAfterRepair = true;
+
+    await handler(
+      { messages: [{ role: "assistant", stopReason: "stop" }] },
+      { ui: { notify } },
+    );
+
+    const notifications = notify.mock.calls.map((call) => String(call.arguments?.[0] ?? ""));
+    assert.ok(notifications.some((line) => line.includes("Repair done")), "must report repair completion");
+    assert.equal(
+      notifications.some((line) => line.includes("Auto-mode resumed")),
+      false,
+      "must not claim resumed when auto is already running",
+    );
+    assert.equal(sendUserMessage.mock.calls.length, 0, "must not send /gsd auto when already active");
+  });
+});
+
 // ── Negotiate absorb decisions ───────────────────────────────────────────
 describe("agent-end negotiate — absorb decisions", () => {
   before(() => setupTempAuto());
@@ -141,6 +171,20 @@ describe("agent-end negotiate — absorb decisions", () => {
 
     assert.equal(ctx.absorb.mock.calls.length, 0);
     assert.equal(state.retryCount, 0, "retryCount should be reset");
+  });
+
+  it("does NOT absorb successful turns while fixing", async () => {
+    const { handler, ctx } = await createHandlerCtx();
+    resetRecoveryState();
+    state.isFixing = true;
+    state.resumeAutoAfterRepair = true;
+
+    await handler.negotiate(
+      { messages: [{ role: "assistant", stopReason: "stop" }] },
+      ctx,
+    );
+
+    assert.equal(ctx.absorb.mock.calls.length, 0, "successful turns must pass through to GSD");
   });
 
   it("resets state on repair exhaustion and does NOT absorb", async () => {

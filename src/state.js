@@ -8,6 +8,11 @@ export const state = {
   skippingAgentEndThisTurn: false,
   timer: null,
   rejecter: null,
+  activeRepairToken: null,
+  repairTokenCounter: 0,
+  repairSource: null,
+  repairStartedAt: 0,
+  autoStopRequested: false,
 };
 
 // Cancel sleep only — does not reset recovery counters.
@@ -30,6 +35,24 @@ export function resetRecoveryState() {
   state.repairExhaustedThisTurn = false;
   state.skipNextAgentEnd = false;
   state.skippingAgentEndThisTurn = false;
+  state.activeRepairToken = null;
+  state.repairSource = null;
+  state.repairStartedAt = 0;
+  state.autoStopRequested = false;
+}
+
+export function beginRepairSession(source) {
+  state.isFixing = true;
+  state.resumeAutoAfterRepair = true;
+  state.retryCount = 0;
+  state.repairCount = 0;
+  state.repairExhaustedThisTurn = false;
+  state.repairTokenCounter += 1;
+  state.activeRepairToken = `repair-${state.repairTokenCounter}`;
+  state.repairSource = source;
+  state.repairStartedAt = Date.now();
+  state.autoStopRequested = true;
+  return state.activeRepairToken;
 }
 
 export function sleep(ms) {

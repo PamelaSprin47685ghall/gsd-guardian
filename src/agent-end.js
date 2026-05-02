@@ -4,15 +4,17 @@ import { clearLastToolInvocationError } from "./clear-tool-error.js";
 import { extractText } from "./extract-text.js";
 import { isUserCancellation } from "./user-cancellation.js";
 import { shouldRecover } from "./should-recover.js";
+import {
+  finishRepairFlow,
+  formatRepairFailure,
+  formatRetryPrompt,
+  startRepairFlow,
+} from "./repair-flow.js";
 
 const RETRY_MAX = Number(process.env.GUARDIAN_RETRY_MAX) || 10;
 const REPAIR_MAX = Number(process.env.GUARDIAN_REPAIR_MAX) || 5;
 const BACKOFF_MS = Number(process.env.GUARDIAN_BACKOFF_MS) || 1000;
 const BACKOFF_MAX_MS = Number(process.env.GUARDIAN_BACKOFF_MAX_MS) || 30000;
-
-function formatError(text) {
-  return `\`\`\`\n${text}\n\`\`\``;
-}
 
 function getErrorText(lastMsg, event) {
   const candidates = [
@@ -26,8 +28,8 @@ function getErrorText(lastMsg, event) {
     if (text) return text;
   }
 
-  const anyMsg = event?.messages?.find(m => {
-    const text = extractText(m?.errorMessage || m?.content || m?.message);
+  const anyMsg = event?.messages?.find((message) => {
+    const text = extractText(message?.errorMessage || message?.content || message?.message);
     return text && text.length > 0;
   });
 
@@ -44,30 +46,6 @@ function getErrorText(lastMsg, event) {
 const isGsdExtension = (extPath) =>
   extPath.includes("extensions") && (extPath.includes("/gsd/") || extPath.endsWith("/gsd"));
 
-function startRepair(pi, ctx, errorText) {
-  state.isFixing = true;
-  state.resumeAutoAfterRepair = true;
-  state.retryCount = 0;
-  state.repairCount = 0;
-
-  ctx.ui.notify("🔥 [Guardian] Auto-mode paused. Starting repair...", "error");
-  pi.sendUserMessage(
-    `Auto-mode paused.\n\nError:\n${formatError(errorText)}\n\nDiagnose, fix, and reply. I will resume auto-mode after the fix.`,
-  );
-}
-
-async function finishRepair(pi, ctx) {
-  const shouldResumeAuto = state.resumeAutoAfterRepair;
-  resetRecoveryState();
-
-  ctx.ui.notify("✅ [Guardian] Repair done.", "success");
-  if (!shouldResumeAuto) return;
-
-  // Simulate user typing /gsd auto to resume
-  ctx.ui.notify("▶️ [Guardian] Auto-mode resumed.", "success");
-  pi.sendUserMessage("/gsd auto");
-}
-
 export function markNextAgentEndAsSessionSwitch() {
   state.skipNextAgentEnd = true;
 }
@@ -81,7 +59,6 @@ export function createAgentEndHandler(pi) {
 
     const lastMsg = event.messages?.at(-1);
 
-    // User cancellation - do not intervene
     if (isUserCancellation(lastMsg)) return;
 
     if (state.repairExhaustedThisTurn) {
@@ -95,19 +72,19 @@ export function createAgentEndHandler(pi) {
 
     if (state.isFixing) {
       if (!needsRecovery) {
-        await finishRepair(pi, ctx);
+        await finishRepairFlow(pi, ctx);
         return;
       }
 
+      state.repairCount += 1;
       if (state.repairCount >= REPAIR_MAX) {
         ctx.ui.notify("💀 [Guardian] Repair failed. Halting.", "error");
         resetRecoveryState();
         return;
       }
 
-      state.repairCount++;
       ctx.ui.notify(`❌ [Guardian] Repair turn ${state.repairCount}/${REPAIR_MAX} failed.`, "warning");
-      pi.sendUserMessage(`Repair failed:\n${formatError(errorText)}\nFix this and continue.`);
+      pi.sendUserMessage(formatRepairFailure(errorText));
       return;
     }
 
@@ -116,7 +93,7 @@ export function createAgentEndHandler(pi) {
       return;
     }
 
-    state.retryCount++;
+    state.retryCount += 1;
     if (state.retryCount <= RETRY_MAX) {
       const delayMs = Math.min(BACKOFF_MS * Math.pow(2, state.retryCount - 1), BACKOFF_MAX_MS);
 
@@ -134,9 +111,7 @@ export function createAgentEndHandler(pi) {
       }
 
       ctx.ui.notify(`🚀 Retry ${state.retryCount}...`, "info");
-      pi.sendUserMessage(
-        `**EXECUTION ERROR**\nFailed:\n${formatError(errorText)}\nFix params/logic and retry the same step.`,
-      );
+      pi.sendUserMessage(formatRetryPrompt(errorText));
       return;
     }
 
@@ -147,25 +122,20 @@ export function createAgentEndHandler(pi) {
       return;
     }
 
-    startRepair(pi, ctx, errorText);
+    await startRepairFlow(pi, ctx, "agent-end", errorText);
   };
 
   handler.negotiate = async (event, ctx) => {
     if (state.skipNextAgentEnd) {
       state.skipNextAgentEnd = false;
+      resetRecoveryState();
       state.skippingAgentEndThisTurn = true;
-      state.retryCount = 0;
-      state.repairCount = 0;
-      state.isFixing = false;
-      state.resumeAutoAfterRepair = false;
-      state.repairExhaustedThisTurn = false;
       ctx.absorb?.(isGsdExtension);
       return;
     }
 
     const lastMsg = event.messages?.at(-1);
 
-    // User cancellation - do not absorb
     if (isUserCancellation(lastMsg)) return;
 
     const needsRecovery = shouldRecover(lastMsg);
@@ -177,17 +147,12 @@ export function createAgentEndHandler(pi) {
           ctx.ui.notify?.("[Guardian] Could not clear GSD lastToolInvocationError.", "warning");
         }
       }
-
-      if (!state.isFixing || !state.resumeAutoAfterRepair) {
-        state.retryCount = 0;
-        return;
-      }
-      ctx.absorb?.(isGsdExtension);
+      state.retryCount = 0;
       return;
     }
 
     if (state.isFixing) {
-      state.repairCount++;
+      state.repairCount += 1;
       if (state.repairCount >= REPAIR_MAX) {
         state.repairExhaustedThisTurn = true;
         state.retryCount = 0;

@@ -1,7 +1,6 @@
-import { state } from "./state.js";
 import { extractText } from "./extract-text.js";
-import { isAutoModeRunning } from "./probe.js";
 import { findModule } from "./util.js";
+import { startRepairFlow } from "./repair-flow.js";
 
 let unsubscribe = null;
 let lastNotificationId = null;
@@ -16,19 +15,6 @@ const WARNING_IGNORE_PATTERNS = [
   /^request aborted by user$/i,
 ];
 
-function repairPrompt(message) {
-  return [
-    "Auto-mode paused due to recoverable error.",
-    "",
-    "Error:",
-    "```",
-    message,
-    "```",
-    "",
-    "Diagnose and fix. Reply when done; Guardian will resume auto-mode after the fix.",
-  ].join("\n");
-}
-
 function getNotificationLevel(entry) {
   return (entry?.kind ?? entry?.severity ?? "").toLowerCase();
 }
@@ -39,21 +25,6 @@ function shouldRecoverFromWarning(message) {
     return false;
   }
   return true;
-}
-
-async function startRepair(pi, message) {
-  if (state.isFixing) return;
-
-  const isAuto = await isAutoModeRunning();
-  if (!isAuto) return;
-
-  state.isFixing = true;
-  state.resumeAutoAfterRepair = true;
-  state.retryCount = 0;
-  state.repairCount = 0;
-
-  pi.ui?.notify?.("\u{1F525} [Guardian] Auto-mode paused. Starting repair...", "error");
-  pi.sendUserMessage(repairPrompt(message));
 }
 
 async function processNotification(pi, entry) {
@@ -71,15 +42,13 @@ async function processNotification(pi, entry) {
   const level = getNotificationLevel(entry);
   if (level === "blocked" || level === "error") {
     if (!message) return;
-    await startRepair(pi, message);
+    await startRepairFlow(pi, pi, "notification", message);
     return;
   }
 
   if (level === "warning") {
-    if (!shouldRecoverFromWarning(message)) {
-      return;
-    }
-    await startRepair(pi, message);
+    if (!shouldRecoverFromWarning(message)) return;
+    await startRepairFlow(pi, pi, "notification", message);
   }
 }
 
@@ -102,7 +71,7 @@ async function initStoreListener(pi) {
     unsubscribe?.();
     unsubscribe = store.onNotificationStoreChange(() => {
       const latest = store.readNotifications()?.[0];
-      processNotification(pi, latest).catch(err => {
+      processNotification(pi, latest).catch((err) => {
         console.error("[Guardian] notification error:", err);
       });
     });
@@ -115,18 +84,18 @@ async function initStoreListener(pi) {
 
 export function setupNotificationListener(pi) {
   pi.on?.("notification", (event) => {
-    processNotification(pi, event).catch(err => {
+    processNotification(pi, event).catch((err) => {
       console.error("[Guardian] notification handler error:", err);
     });
   });
 
   pi.on?.("session_start", () => {
-    initStoreListener(pi).catch(err => {
+    initStoreListener(pi).catch((err) => {
       console.error("[Guardian] store init error:", err);
     });
   });
 
-  initStoreListener(pi).catch(err => {
+  initStoreListener(pi).catch((err) => {
     console.error("[Guardian] store init error:", err);
   });
 }
