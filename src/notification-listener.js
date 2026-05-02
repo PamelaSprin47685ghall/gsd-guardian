@@ -4,6 +4,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { state } from "./state.js";
 import { extractText } from "./extract-text.js";
+import { isAutoModeRunning } from "./probe.js";
 
 const STORE_PATHS = [
   () => {
@@ -30,8 +31,11 @@ function repairPrompt(message) {
   ].join("\n");
 }
 
-function startRepair(pi, message) {
+async function startRepair(pi, message) {
   if (state.isFixing) return;
+
+  const isAuto = await isAutoModeRunning();
+  if (!isAuto) return;
 
   state.isFixing = true;
   state.resumeAutoAfterRepair = true;
@@ -42,7 +46,7 @@ function startRepair(pi, message) {
   pi.sendUserMessage(repairPrompt(message));
 }
 
-function processNotification(pi, entry) {
+async function processNotification(pi, entry) {
   if (!entry) return;
   if (entry.id && entry.id === lastNotificationId) return;
   if (entry.id) lastNotificationId = entry.id;
@@ -57,7 +61,7 @@ function processNotification(pi, entry) {
   }
   
   if (!message) return;
-  startRepair(pi, message);
+  await startRepair(pi, message);
 }
 
 async function loadStoreModule() {
@@ -86,7 +90,7 @@ async function initStoreListener(pi) {
   unsubscribe?.();
   unsubscribe = store.onNotificationStoreChange(() => {
     const latest = store.readNotifications()?.[0];
-    processNotification(pi, latest);
+    void processNotification(pi, latest);
   });
   listenerReady = true;
   return true;
@@ -94,7 +98,7 @@ async function initStoreListener(pi) {
 
 export function setupNotificationListener(pi) {
   pi.on?.("notification", (event) => {
-    processNotification(pi, event);
+    void processNotification(pi, event);
   });
 
   pi.on?.("session_start", () => {

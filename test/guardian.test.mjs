@@ -399,4 +399,24 @@ describe("Non-user-cancellation errors", () => {
 
     assert.equal(ctx.absorb.mock.calls.length, 0);
   });
+
+  it("absorbs validation failure (non-normal completion)", async () => {
+    const { handler, ctx } = await createHandlerCtx();
+    resetRecoveryState();
+
+    await handler.negotiate(
+      {
+        messages: [
+          {
+            role: "assistant",
+            stopReason: "aborted",
+            errorMessage: "Milestone M013 has planned operational verification but the validation output does not address it."
+          },
+        ],
+      },
+      ctx,
+    );
+
+    assert.equal(ctx.absorb.mock.calls.length, 1, "validation failures should be absorbed and recovered");
+  });
 });

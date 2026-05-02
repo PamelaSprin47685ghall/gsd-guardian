@@ -6,11 +6,19 @@
 
 ## 核心原则
 
-### 1. 拦截规则：非用户中断的所有停止
+### 1. 拦截规则：非正常完成的所有停止
 
+**第一性原理：只定义什么时候不恢复，而不是定义什么时候恢复。**
+
+不恢复的情况（白名单）：
+- 用户主动中断（Esc/Ctrl+C）
+- 正常完成（`stopReason: "stop"`, `"end_turn"`, `"max_tokens"`）
+
+**其他所有情况都恢复**，包括但不限于：
 - `stopReason === "error"` → 拦截
 - `stopReason === "aborted"` + 有错误内容 → 拦截
-- **唯一例外**：用户中断（空 content + 空 errorMessage，或 "Operation aborted"）
+- 验证失败导致的停止 → 拦截
+- 任何非正常完成的停止 → 拦截
 
 ### 2. 恢复策略：重试 → 修复 → 放弃
 
@@ -32,4 +40,27 @@
 ### 5. 清理副作用：成功后清除 GSD 错误标记
 
 - 调用 `clearLastToolInvocationError()` 防止 GSD 误判为失败
+
+## 实现细节
+
+### notification-listener 的 auto-mode 检查
+
+`notification-listener.js` 在触发修复前必须检查 `isAutoModeRunning()`：
+
+```javascript
+async function startRepair(pi, message) {
+  if (state.isFixing) return;
+
+  const isAuto = await isAutoModeRunning();
+  if (!isAuto) return;  // 手动模式下不触发修复
+
+  state.isFixing = true;
+  state.resumeAutoAfterRepair = true;
+  // ...
+}
+```
+
+这确保了：
+- **手动模式**：notification 不触发修复，只有 agent_end 触发重试
+- **auto-mode**：notification 和 agent_end 都可以触发修复
 
