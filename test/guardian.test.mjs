@@ -319,3 +319,73 @@ describe("probe", () => {
     }
   });
 });
+
+// ── GSD specific warnings ───────────────────────────────────────────────
+describe("GSD specific warnings", () => {
+  before(() => setupTempAuto());
+  after(() => teardownTempAuto());
+
+  it("absorbs GSD validation warning even if stopReason is 'stop'", async () => {
+    const { handler, ctx } = await createHandlerCtx();
+    resetRecoveryState();
+
+    await handler.negotiate(
+      {
+        messages: [
+          {
+            role: "assistant",
+            stopReason: "stop",
+            content: "Warning: Milestone M013 has planned operational verification but the validation output does not address it."
+          },
+        ],
+      },
+      ctx,
+    );
+
+    assert.equal(ctx.absorb.mock.calls.length, 1);
+  });
+
+  it("absorbs GSD validation warning if stopReason is 'aborted'", async () => {
+    const { handler, ctx } = await createHandlerCtx();
+    resetRecoveryState();
+
+    await handler.negotiate(
+      {
+        messages: [
+          {
+            role: "assistant",
+            stopReason: "aborted",
+            errorMessage: "Warning: Milestone M013 ... validation output does not address it"
+          },
+        ],
+      },
+      ctx,
+    );
+
+    assert.equal(ctx.absorb.mock.calls.length, 1);
+  });
+
+  it("sends repair message on GSD validation warning in handler", async () => {
+    const mod = await importFresh("../src/agent-end.js");
+    const sendUserMessage = mock.fn(() => {});
+    const handler = mod.createAgentEndHandler({ on: () => {}, sendUserMessage });
+
+    await handler(
+      {
+        messages: [
+          {
+            role: "assistant",
+            stopReason: "stop",
+            content: "Warning: Milestone M013 has planned operational verification but the validation output does not address it."
+          },
+        ],
+      },
+      { ui: { notify: () => {} } }
+    );
+
+    assert.equal(sendUserMessage.mock.calls.length, 1);
+    const msg = sendUserMessage.mock.calls[0].arguments[0];
+    assert.ok(msg.includes("Warning: Milestone M013"));
+    assert.ok(msg.includes("EXECUTION ERROR"));
+  });
+});

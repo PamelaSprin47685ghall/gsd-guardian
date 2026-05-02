@@ -11,8 +11,21 @@ function formatError(text) {
   return `\`\`\`\n${text}\n\`\`\``;
 }
 
+function isGsdValidationWarning(lastMsg) {
+  const text = lastMsg?.errorMessage || lastMsg?.content || "";
+  if (typeof text !== "string") return false;
+
+  return (
+    text.includes("Warning: Milestone") &&
+    (text.includes("validation output does not address it") ||
+      text.includes("verification class awareness") ||
+      text.includes("operational compliance"))
+  );
+}
+
 function isErrorTurn(lastMsg) {
-  return lastMsg?.role === "assistant" && lastMsg.stopReason === "error";
+  if (lastMsg?.role !== "assistant") return false;
+  return lastMsg.stopReason === "error" || isGsdValidationWarning(lastMsg);
 }
 
 /**
@@ -26,7 +39,8 @@ export function createAgentEndHandler(pi) {
   // ── Handler (Pass 2) ──────────────────────────────────────────────────
   const handler = async (event, ctx) => {
     const lastMsg = event.messages?.at(-1);
-    if (lastMsg?.stopReason === "aborted") return;
+    if (lastMsg?.stopReason === "aborted" && !isGsdValidationWarning(lastMsg))
+      return;
 
     // Phase 0 — repair exhaustion: consume flag. State is already clean
     // (negotiate reset it).
@@ -46,7 +60,10 @@ export function createAgentEndHandler(pi) {
     state.lastAutoMode = isAuto;
 
     const isError = isErrorTurn(lastMsg);
-    const errorText = lastMsg?.errorMessage || "Unknown Schema or API Error";
+    const errorText =
+      lastMsg?.errorMessage ||
+      (isGsdValidationWarning(lastMsg) ? lastMsg?.content : null) ||
+      "Unknown Schema or API Error";
 
     // Phase A — repair mode
     if (state.isFixing) {
@@ -148,7 +165,8 @@ export function createAgentEndHandler(pi) {
   // ── Negotiate (Pass 1) ────────────────────────────────────────────────
   handler.negotiate = async (event, ctx) => {
     const lastMsg = event.messages?.at(-1);
-    if (lastMsg?.stopReason === "aborted") return;
+    if (lastMsg?.stopReason === "aborted" && !isGsdValidationWarning(lastMsg))
+      return;
 
     const isAuto = await isAutoModeRunning();
     if (state.lastAutoMode !== null && state.lastAutoMode !== isAuto) {
