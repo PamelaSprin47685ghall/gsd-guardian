@@ -12,7 +12,10 @@ function formatError(text) {
 }
 
 function isGsdValidationWarning(lastMsg) {
-  const text = lastMsg?.errorMessage || lastMsg?.content || "";
+  let text = lastMsg?.errorMessage || lastMsg?.content || "";
+  if (Array.isArray(text)) {
+    text = text.map(part => part?.text || (typeof part === "string" ? part : "")).join("");
+  }
   if (typeof text !== "string") return false;
 
   return (
@@ -23,9 +26,14 @@ function isGsdValidationWarning(lastMsg) {
   );
 }
 
-function isErrorTurn(lastMsg) {
-  if (lastMsg?.role !== "assistant") return false;
-  return lastMsg.stopReason === "error" || isGsdValidationWarning(lastMsg);
+function isErrorTurn(lastMsg, event) {
+  // Check last message
+  if (lastMsg?.stopReason === "error" || isGsdValidationWarning(lastMsg)) return true;
+
+  // Check any message in the current turn for the warning
+  if (event?.messages?.some(m => isGsdValidationWarning(m))) return true;
+
+  return false;
 }
 
 /**
@@ -33,7 +41,7 @@ function isErrorTurn(lastMsg) {
  * `extensions/gsd/...`, NOT `extensions/gsd-guardian/...`.
  */
 const isGsdExtension = (extPath) =>
-  /(^|\/|\\)extensions[\/\\]gsd([\/\\]|$)/.test(extPath);
+  extPath.includes("extensions") && (extPath.includes("/gsd/") || extPath.endsWith("/gsd"));
 
 export function createAgentEndHandler(pi) {
   // ── Handler (Pass 2) ──────────────────────────────────────────────────
@@ -59,7 +67,7 @@ export function createAgentEndHandler(pi) {
     }
     state.lastAutoMode = isAuto;
 
-    const isError = isErrorTurn(lastMsg);
+    const isError = isErrorTurn(lastMsg, event);
     const errorText =
       lastMsg?.errorMessage ||
       (isGsdValidationWarning(lastMsg) ? lastMsg?.content : null) ||
@@ -165,6 +173,7 @@ export function createAgentEndHandler(pi) {
   // ── Negotiate (Pass 1) ────────────────────────────────────────────────
   handler.negotiate = async (event, ctx) => {
     const lastMsg = event.messages?.at(-1);
+
     if (lastMsg?.stopReason === "aborted" && !isGsdValidationWarning(lastMsg))
       return;
 
@@ -174,7 +183,7 @@ export function createAgentEndHandler(pi) {
     }
     state.lastAutoMode = isAuto;
 
-    if (!isErrorTurn(lastMsg)) {
+    if (!isErrorTurn(lastMsg, event)) {
       // Success + Guardian was recovering → clean both GSD diagnostic
       // state and Guardian state BEFORE GSD's handler runs in Pass 2.
       // This ensures that when resolveAgentEnd() fires, no stale
