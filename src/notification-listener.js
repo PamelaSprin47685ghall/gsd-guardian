@@ -8,6 +8,14 @@ let lastNotificationId = null;
 let listenerReady = false;
 let initPromise = null;
 
+const WARNING_IGNORE_PATTERNS = [
+  /unknown\s+auto-loop\s+phase/i,
+  /unknown\s+.*\s+phase/i,
+  /^operation aborted$/i,
+  /^request was aborted$/i,
+  /^request aborted by user$/i,
+];
+
 function repairPrompt(message) {
   return [
     "Auto-mode paused due to recoverable error.",
@@ -19,6 +27,18 @@ function repairPrompt(message) {
     "",
     "Diagnose and fix. Reply when done; Guardian will resume auto-mode after the fix.",
   ].join("\n");
+}
+
+function getNotificationLevel(entry) {
+  return (entry?.kind ?? entry?.severity ?? "").toLowerCase();
+}
+
+function shouldRecoverFromWarning(message) {
+  if (!message) return false;
+  if (WARNING_IGNORE_PATTERNS.some((pattern) => pattern.test(message))) {
+    return false;
+  }
+  return true;
 }
 
 async function startRepair(pi, message) {
@@ -41,10 +61,6 @@ async function processNotification(pi, entry) {
   if (entry.id && entry.id === lastNotificationId) return;
   if (entry.id) lastNotificationId = entry.id;
 
-  // Process blocked, error, and warning notifications
-  // Warning-level dispatch-stops (e.g. validation failures) should trigger repair
-  if (entry.kind !== "blocked" && entry.kind !== "error" && entry.kind !== "warning") return;
-
   const candidates = [entry.errorMessage, entry.content, entry.message];
   let message = "";
   for (const candidate of candidates) {
@@ -52,8 +68,19 @@ async function processNotification(pi, entry) {
     if (message) break;
   }
 
-  if (!message) return;
-  await startRepair(pi, message);
+  const level = getNotificationLevel(entry);
+  if (level === "blocked" || level === "error") {
+    if (!message) return;
+    await startRepair(pi, message);
+    return;
+  }
+
+  if (level === "warning") {
+    if (!shouldRecoverFromWarning(message)) {
+      return;
+    }
+    await startRepair(pi, message);
+  }
 }
 
 async function loadStoreModule() {

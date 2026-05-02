@@ -450,4 +450,55 @@ describe("notification-listener warning handling", () => {
 
     assert.ok(sendUserMessage.mock.calls.length > 0, "should trigger repair on warning notifications");
   });
+
+  it("ignores unknown auto-loop phase warnings from extension ecosystem", async () => {
+    const { setupNotificationListener } = await import("../src/notification-listener.js");
+
+    const sendUserMessage = mock.fn(() => {});
+    const notify = mock.fn(() => {});
+    const pi = {
+      on: (event, handler) => {
+        if (event === "notification") {
+          setTimeout(() => handler({
+            severity: "warning",
+            source: "workflow-logger",
+            message: "[ecosystem] unknown auto-loop phase: dag-execution",
+            id: "test-warning-unknown-phase",
+          }), 10);
+        }
+      },
+      sendUserMessage,
+      ui: { notify },
+    };
+
+    setupNotificationListener(pi);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    assert.equal(sendUserMessage.mock.calls.length, 0, "unknown phase warning should not trigger repair");
+  });
+
+  it("ignores user-cancellation warning text", async () => {
+    const { setupNotificationListener } = await import("../src/notification-listener.js");
+
+    const sendUserMessage = mock.fn(() => {});
+    const notify = mock.fn(() => {});
+    const pi = {
+      on: (event, handler) => {
+        if (event === "notification") {
+          setTimeout(() => handler({
+            severity: "warning",
+            message: "Operation aborted",
+            id: "test-warning-operation-aborted",
+          }), 10);
+        }
+      },
+      sendUserMessage,
+      ui: { notify },
+    };
+
+    setupNotificationListener(pi);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    assert.equal(sendUserMessage.mock.calls.length, 0, "user cancellation warning should not trigger repair");
+  });
 });
