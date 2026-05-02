@@ -4,19 +4,32 @@
 
 **任何导致 auto-mode 停止的非用户主动中断，都自动恢复。**
 
-## 当前限制
+## 架构方案
 
-Guardian 作为 GSD extension，只能通过以下钩子介入：
-- `agent_end` — LLM 调用结束后
-- `notification` — GSD 发送 extension notification 时
-- `stop` — auto-mode 停止时（但此时无法启动新的 agent 会话）
+### 三层拦截机制
 
-**无法捕获的场景：**
-- **dispatch-stop（验证失败）** — 发生在 LLM 调用之前，不触发 agent_end
-- **dispatch-stop 不触发 notification 事件** — `ctx.ui.notify("warning")` 只是 UI 通知，不会 emit extension event
+1. **agent_end 拦截** — 捕获 LLM 调用后的错误
+2. **notification 拦截** — 捕获 GSD 发送的 error/blocked/warning 通知
+3. **watchdog 拦截** — 捕获 dispatch-stop（验证失败等在 LLM 调用前的停止）
+
+### Watchdog 机制
+
+**问题：** dispatch-stop 发生在 LLM 调用之前，不触发 agent_end 或 notification 事件。
 
 **解决方案：**
-需要修改 GSD 核心代码，在 dispatch-stop 时 emit 一个 extension 可以监听的事件，或者让 `ctx.ui.notify` 也触发 notification 事件。
+1. `session_start` 时启动 watchdog 定时器（3秒）
+2. `before_agent_start` 时标记 agent 已启动
+3. 如果定时器到期时：
+   - auto-mode 仍在运行
+   - 但 agent 没有启动
+   - 说明卡在 dispatch 阶段
+4. 读取 `.gsd/journal/*.jsonl` 最新的 `dispatch-stop` 事件
+5. 提取 `reason` 并发送给 LLM 修复
+
+**优势：**
+- 无需修改 GSD 核心代码
+- 能捕获所有 dispatch-stop 场景
+- 有完整的错误信息用于修复
 
 ## 核心原则
 

@@ -1,6 +1,7 @@
 import { createAgentEndHandler, markNextAgentEndAsSessionSwitch } from "./src/agent-end.js";
 import { setupNotificationListener } from "./src/notification-listener.js";
 import { cancelSleepOnly, resetRecoveryState } from "./src/state.js";
+import { startWatchdog, stopWatchdog, markAgentStarted } from "./src/watchdog.js";
 
 export default function guardianPlugin(pi) {
   pi.on("agent_end", createAgentEndHandler(pi));
@@ -10,10 +11,22 @@ export default function guardianPlugin(pi) {
     markNextAgentEndAsSessionSwitch();
   });
 
-  // Only intervene on user-initiated cancellation (Esc/Ctrl+C).
-  // Cancel sleep + reset Guardian recovery state so a fresh
-  // /gsd auto starts with clean counters.
+  // Start watchdog when session starts
+  pi.on("session_start", (event, ctx) => {
+    // Get basePath from context or current directory
+    const basePath = ctx?.cwd || process.cwd();
+    startWatchdog(pi, ctx, basePath);
+  });
+
+  // Mark agent started to stop watchdog
+  pi.on("before_agent_start", () => {
+    markAgentStarted();
+  });
+
+  // Stop watchdog on stop
   pi.on("stop", (event) => {
+    stopWatchdog();
+    
     if (event?.reason === "cancelled") {
       cancelSleepOnly();
       resetRecoveryState();

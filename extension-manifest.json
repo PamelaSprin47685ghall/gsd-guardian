@@ -8,6 +8,6 @@
     "platform": ">=2.29.0"
   },
   "provides": {
-    "hooks": ["agent_end", "notification", "session_before_switch", "session_start", "stop"]
+    "hooks": ["agent_end", "notification", "session_before_switch", "session_start", "before_agent_start", "stop"]
   }
 }
