@@ -64,3 +64,16 @@ async function startRepair(pi, message) {
 - **手动模式**：notification 不触发修复，只有 agent_end 触发重试
 - **auto-mode**：notification 和 agent_end 都可以触发修复
 
+### notification-listener 处理 warning 级别通知
+
+`processNotification` 处理 `"blocked"`, `"error"`, 和 `"warning"` 三种通知：
+
+```javascript
+if (entry.kind !== "blocked" && entry.kind !== "error" && entry.kind !== "warning") return;
+```
+
+这确保了：
+- **验证失败**（dispatch-stop with warning level）会触发修复
+- **GSD 在 dispatch 阶段暂停**时，Guardian 通过 notification 事件介入
+- **无需 agent_end 事件**，在 LLM 调用之前就能捕获问题
+

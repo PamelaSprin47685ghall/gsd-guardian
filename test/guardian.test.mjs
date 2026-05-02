@@ -420,3 +420,34 @@ describe("Non-user-cancellation errors", () => {
     assert.equal(ctx.absorb.mock.calls.length, 1, "validation failures should be absorbed and recovered");
   });
 });
+
+// ── Notification warning handling ───────────────────────────────────────
+describe("notification-listener warning handling", () => {
+  before(() => setupTempAuto());
+  after(() => teardownTempAuto());
+
+  it("triggers repair on warning notifications in auto-mode", async () => {
+    const { setupNotificationListener } = await import("../src/notification-listener.js");
+    
+    const sendUserMessage = mock.fn(() => {});
+    const notify = mock.fn(() => {});
+    const pi = {
+      on: (event, handler) => {
+        if (event === "notification") {
+          setTimeout(() => handler({ 
+            kind: "warning", 
+            content: "Milestone M013 has planned operational verification", 
+            id: "test-warning-1" 
+          }), 10);
+        }
+      },
+      sendUserMessage,
+      ui: { notify }
+    };
+
+    setupNotificationListener(pi);
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    assert.ok(sendUserMessage.mock.calls.length > 0, "should trigger repair on warning notifications");
+  });
+});

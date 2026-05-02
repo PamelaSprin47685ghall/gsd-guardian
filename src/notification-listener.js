@@ -41,7 +41,9 @@ async function processNotification(pi, entry) {
   if (entry.id && entry.id === lastNotificationId) return;
   if (entry.id) lastNotificationId = entry.id;
 
-  if (entry.kind !== "blocked" && entry.kind !== "error") return;
+  // Process blocked, error, and warning notifications
+  // Warning-level dispatch-stops (e.g. validation failures) should trigger repair
+  if (entry.kind !== "blocked" && entry.kind !== "error" && entry.kind !== "warning") return;
 
   const candidates = [entry.errorMessage, entry.content, entry.message];
   let message = "";
