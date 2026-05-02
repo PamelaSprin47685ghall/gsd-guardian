@@ -58,7 +58,6 @@ describe("state machine", () => {
     assert.equal(state.repairExhaustedThisTurn, false);
     assert.equal(state.timer, null);
     assert.equal(state.rejecter, null);
-    assert.equal(state.lastAutoMode, null);
   });
 
   it("sleep resolves after ms", async () => {
@@ -333,32 +332,12 @@ describe("probe", () => {
   });
 });
 
-// ── GSD specific warnings ───────────────────────────────────────────────
-describe("GSD specific warnings", () => {
+// ── Non-user-cancellation errors ────────────────────────────────────────
+describe("Non-user-cancellation errors", () => {
   before(() => setupTempAuto());
   after(() => teardownTempAuto());
 
-  it("absorbs GSD validation warning even if stopReason is 'stop'", async () => {
-    const { handler, ctx } = await createHandlerCtx();
-    resetRecoveryState();
-
-    await handler.negotiate(
-      {
-        messages: [
-          {
-            role: "assistant",
-            stopReason: "stop",
-            content: "Warning: Milestone M013 has planned operational verification but the validation output does not address it."
-          },
-        ],
-      },
-      ctx,
-    );
-
-    assert.equal(ctx.absorb.mock.calls.length, 1);
-  });
-
-  it("absorbs GSD validation warning if stopReason is 'aborted'", async () => {
+  it("does NOT absorb user cancellation (aborted + empty content)", async () => {
     const { handler, ctx } = await createHandlerCtx();
     resetRecoveryState();
 
@@ -368,7 +347,30 @@ describe("GSD specific warnings", () => {
           {
             role: "assistant",
             stopReason: "aborted",
-            errorMessage: "Warning: Milestone M013 ... validation output does not address it"
+            content: [],
+          },
+        ],
+      },
+      ctx,
+    );
+
+    assert.equal(ctx.absorb.mock.calls.length, 0);
+  });
+
+  it("absorbs aborted with error message (not user cancellation)", async () => {
+    const { handler, ctx } = await createHandlerCtx();
+    resetRecoveryState();
+    
+    // Simulate auto-mode was running
+    await handler.negotiate({ messages: [{ role: "assistant", stopReason: "end_turn" }] }, ctx);
+
+    await handler.negotiate(
+      {
+        messages: [
+          {
+            role: "assistant",
+            stopReason: "aborted",
+            errorMessage: "Dispatch stop: validation failed"
           },
         ],
       },
@@ -378,27 +380,23 @@ describe("GSD specific warnings", () => {
     assert.equal(ctx.absorb.mock.calls.length, 1);
   });
 
-  it("sends repair message on GSD validation warning in handler", async () => {
-    const mod = await importFresh("../src/agent-end.js");
-    const sendUserMessage = mock.fn(() => {});
-    const handler = mod.createAgentEndHandler({ on: () => {}, sendUserMessage });
+  it("does NOT absorb 'Operation aborted' (user cancellation)", async () => {
+    const { handler, ctx } = await createHandlerCtx();
+    resetRecoveryState();
 
-    await handler(
+    await handler.negotiate(
       {
         messages: [
           {
             role: "assistant",
-            stopReason: "stop",
-            content: "Warning: Milestone M013 has planned operational verification but the validation output does not address it."
+            stopReason: "aborted",
+            errorMessage: "Operation aborted"
           },
         ],
       },
-      { ui: { notify: () => {} } }
+      ctx,
     );
 
-    assert.equal(sendUserMessage.mock.calls.length, 1);
-    const msg = sendUserMessage.mock.calls[0].arguments[0];
-    assert.ok(msg.includes("Warning: Milestone M013"));
-    assert.ok(msg.includes("validation checkpoint") || msg.includes("Diagnose, fix"));
+    assert.equal(ctx.absorb.mock.calls.length, 0);
   });
 });

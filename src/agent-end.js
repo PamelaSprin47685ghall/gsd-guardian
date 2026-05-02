@@ -2,6 +2,9 @@ import { state, sleep, resetRecoveryState } from "./state.js";
 import { isAutoModeRunning } from "./probe.js";
 import { clearLastToolInvocationError } from "./clear-tool-error.js";
 import { resumePausedAuto } from "./resume-auto.js";
+import { extractText } from "./extract-text.js";
+import { isUserCancellation } from "./user-cancellation.js";
+import { shouldRecover } from "./should-recover.js";
 
 const RETRY_MAX = 10;
 const REPAIR_MAX = 5;
@@ -12,54 +15,45 @@ function formatError(text) {
   return `\`\`\`\n${text}\n\`\`\``;
 }
 
-export function isGsdValidationWarning(message) {
-  let text = message?.errorMessage || message?.content || message?.message || "";
-  if (Array.isArray(text)) {
-    text = text.map(part => part?.text || (typeof part === "string" ? part : "")).join("");
-  }
-  if (typeof text !== "string") return false;
-
-  return (
-    text.includes("Warning: Milestone") &&
-    (text.includes("validation output does not address it") ||
-      text.includes("verification class awareness") ||
-      text.includes("operational compliance"))
-  );
-}
-
-function hasGsdValidationWarning(lastMsg, event) {
-  return isGsdValidationWarning(lastMsg) || !!event?.messages?.some(isGsdValidationWarning);
-}
-
-function isErrorTurn(lastMsg, event) {
-  return lastMsg?.stopReason === "error" || hasGsdValidationWarning(lastMsg, event);
-}
-
 function getErrorText(lastMsg, event) {
-  if (lastMsg?.errorMessage) return lastMsg.errorMessage;
-  if (isGsdValidationWarning(lastMsg)) return lastMsg.content || lastMsg.message;
-  const warning = event?.messages?.find(isGsdValidationWarning);
-  return warning?.errorMessage || warning?.content || warning?.message || "Unknown Schema or API Error";
+  const candidates = [
+    lastMsg?.errorMessage,
+    lastMsg?.content,
+    lastMsg?.message,
+  ];
+  
+  for (const candidate of candidates) {
+    const text = extractText(candidate);
+    if (text) return text;
+  }
+  
+  const anyMsg = event?.messages?.find(m => {
+    const text = extractText(m?.errorMessage || m?.content || m?.message);
+    return text && text.length > 0;
+  });
+  
+  if (anyMsg) {
+    for (const candidate of [anyMsg.errorMessage, anyMsg.content, anyMsg.message]) {
+      const text = extractText(candidate);
+      if (text) return text;
+    }
+  }
+  
+  return "Auto-mode stopped";
 }
 
 const isGsdExtension = (extPath) =>
   extPath.includes("extensions") && (extPath.includes("/gsd/") || extPath.endsWith("/gsd"));
 
-function startRepair(pi, ctx, errorText, { resumeAutoAfterRepair }) {
+function startRepair(pi, ctx, errorText) {
   state.isFixing = true;
-  state.resumeAutoAfterRepair = resumeAutoAfterRepair;
+  state.resumeAutoAfterRepair = true;
   state.retryCount = 0;
   state.repairCount = 0;
 
-  ctx.ui.notify(
-    resumeAutoAfterRepair
-      ? "🔥 [Guardian] GSD validation checkpoint detected. Starting repair before auto resume."
-      : "🔥 10 retries exhausted. Entering LLM repair mode...",
-    "error",
-  );
-
+  ctx.ui.notify("🔥 [Guardian] Auto-mode paused. Starting repair...", "error");
   pi.sendUserMessage(
-    `${resumeAutoAfterRepair ? "Auto-mode paused at a recoverable GSD validation checkpoint." : "Auto-mode paused after 10 consecutive failures."}\n\nError:\n${formatError(errorText)}\n\nDiagnose, fix, and reply. I will ${resumeAutoAfterRepair ? "resume auto-mode after the fix" : "continue the blocked step after the fix"}.`,
+    `Auto-mode paused.\n\nError:\n${formatError(errorText)}\n\nDiagnose, fix, and reply. I will resume auto-mode after the fix.`,
   );
 }
 
@@ -67,12 +61,12 @@ async function finishRepair(pi, ctx) {
   const shouldResumeAuto = state.resumeAutoAfterRepair;
   resetRecoveryState();
 
-  ctx.ui.notify("✅ [Guardian] LLM repair done.", "success");
+  ctx.ui.notify("✅ [Guardian] Repair done.", "success");
   if (!shouldResumeAuto) return;
 
   const result = await resumePausedAuto(pi, ctx);
   if (result === "resumed" || result === "already-active") {
-    ctx.ui.notify("▶️ [Guardian] Auto-mode resumed after repair.", "success");
+    ctx.ui.notify("▶️ [Guardian] Auto-mode resumed.", "success");
     return;
   }
 
@@ -94,26 +88,21 @@ export function createAgentEndHandler(pi) {
     }
 
     const lastMsg = event.messages?.at(-1);
-    const hasValidationWarning = hasGsdValidationWarning(lastMsg, event);
-    if (lastMsg?.stopReason === "aborted" && !hasValidationWarning) return;
+
+    // User cancellation - do not intervene
+    if (isUserCancellation(lastMsg)) return;
 
     if (state.repairExhaustedThisTurn) {
       state.repairExhaustedThisTurn = false;
-      ctx.ui.notify("💀 [Guardian] Repair exhausted. GSD handling final failure.", "error");
+      ctx.ui.notify("💀 [Guardian] Repair exhausted. Returning control.", "error");
       return;
     }
 
-    const isAuto = await isAutoModeRunning();
-    if (state.lastAutoMode !== null && state.lastAutoMode !== isAuto) {
-      state.retryCount = 0;
-    }
-    state.lastAutoMode = isAuto;
-
-    const isError = isErrorTurn(lastMsg, event);
+    const needsRecovery = shouldRecover(lastMsg);
     const errorText = getErrorText(lastMsg, event);
 
     if (state.isFixing) {
-      if (!isError) {
+      if (!needsRecovery) {
         await finishRepair(pi, ctx);
         return;
       }
@@ -124,18 +113,14 @@ export function createAgentEndHandler(pi) {
         return;
       }
 
+      state.repairCount++;
       ctx.ui.notify(`❌ [Guardian] Repair turn ${state.repairCount}/${REPAIR_MAX} failed.`, "warning");
       pi.sendUserMessage(`Repair failed:\n${formatError(errorText)}\nFix this and continue.`);
       return;
     }
 
-    if (!isError) {
+    if (!needsRecovery) {
       state.retryCount = 0;
-      return;
-    }
-
-    if (hasValidationWarning) {
-      startRepair(pi, ctx, errorText, { resumeAutoAfterRepair: true });
       return;
     }
 
@@ -156,11 +141,6 @@ export function createAgentEndHandler(pi) {
         return;
       }
 
-      if (isAuto && !(await isAutoModeRunning())) {
-        ctx.ui.notify("⏹️ [Guardian] Auto-mode stopped during backoff.", "warning");
-        return;
-      }
-
       ctx.ui.notify(`🚀 Retry ${state.retryCount}...`, "info");
       pi.sendUserMessage(
         `**EXECUTION ERROR**\nFailed:\n${formatError(errorText)}\nFix params/logic and retry the same step.`,
@@ -168,13 +148,14 @@ export function createAgentEndHandler(pi) {
       return;
     }
 
+    const isAuto = await isAutoModeRunning();
     if (!isAuto) {
-      ctx.ui.notify("💀 [Guardian] Manual retry budget exhausted. Returning control to user.", "error");
+      ctx.ui.notify("💀 [Guardian] Manual retry budget exhausted.", "error");
       resetRecoveryState();
       return;
     }
 
-    startRepair(pi, ctx, errorText, { resumeAutoAfterRepair: false });
+    startRepair(pi, ctx, errorText);
   };
 
   handler.negotiate = async (event, ctx) => {
@@ -191,16 +172,13 @@ export function createAgentEndHandler(pi) {
     }
 
     const lastMsg = event.messages?.at(-1);
-    const hasValidationWarning = hasGsdValidationWarning(lastMsg, event);
-    if (lastMsg?.stopReason === "aborted" && !hasValidationWarning) return;
 
-    const isAuto = await isAutoModeRunning();
-    if (state.lastAutoMode !== null && state.lastAutoMode !== isAuto) {
-      state.retryCount = 0;
-    }
-    state.lastAutoMode = isAuto;
+    // User cancellation - do not absorb
+    if (isUserCancellation(lastMsg)) return;
 
-    if (!isErrorTurn(lastMsg, event)) {
+    const needsRecovery = shouldRecover(lastMsg);
+
+    if (!needsRecovery) {
       if (state.retryCount > 0 || state.isFixing) {
         const cleared = await clearLastToolInvocationError();
         if (!cleared) {

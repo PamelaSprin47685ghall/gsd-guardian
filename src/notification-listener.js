@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { state } from "./state.js";
-import { isGsdValidationWarning } from "./agent-end.js";
+import { extractText } from "./extract-text.js";
 
 const STORE_PATHS = [
   () => {
@@ -19,18 +19,18 @@ let listenerReady = false;
 
 function repairPrompt(message) {
   return [
-    "Auto-mode paused at a recoverable GSD validation checkpoint.",
+    "Auto-mode paused due to recoverable error.",
     "",
     "Error:",
     "```",
     message,
     "```",
     "",
-    "Diagnose and fix the validation artifact. Reply when done; Guardian will resume auto-mode after the fix.",
+    "Diagnose and fix. Reply when done; Guardian will resume auto-mode after the fix.",
   ].join("\n");
 }
 
-function startValidationRepair(pi, message) {
+function startRepair(pi, message) {
   if (state.isFixing) return;
 
   state.isFixing = true;
@@ -38,7 +38,7 @@ function startValidationRepair(pi, message) {
   state.retryCount = 0;
   state.repairCount = 0;
 
-  pi.ui?.notify?.("🔥 [Guardian] GSD validation checkpoint detected. Starting repair before auto resume.", "error");
+  pi.ui?.notify?.("🔥 [Guardian] Auto-mode paused. Starting repair...", "error");
   pi.sendUserMessage(repairPrompt(message));
 }
 
@@ -47,9 +47,17 @@ function processNotification(pi, entry) {
   if (entry.id && entry.id === lastNotificationId) return;
   if (entry.id) lastNotificationId = entry.id;
 
-  const message = entry.message || "";
-  if (!isGsdValidationWarning({ message })) return;
-  startValidationRepair(pi, message);
+  if (entry.kind !== "blocked" && entry.kind !== "error") return;
+  
+  const candidates = [entry.errorMessage, entry.content, entry.message];
+  let message = "";
+  for (const candidate of candidates) {
+    message = extractText(candidate);
+    if (message) break;
+  }
+  
+  if (!message) return;
+  startRepair(pi, message);
 }
 
 async function loadStoreModule() {
@@ -86,8 +94,7 @@ async function initStoreListener(pi) {
 
 export function setupNotificationListener(pi) {
   pi.on?.("notification", (event) => {
-    if (event?.kind !== "blocked" && event?.kind !== "error") return;
-    processNotification(pi, { message: event.message });
+    processNotification(pi, event);
   });
 
   pi.on?.("session_start", () => {
