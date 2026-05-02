@@ -570,4 +570,20 @@ describe("notification-listener warning handling", () => {
 
     assert.equal(sendUserMessage.mock.calls.length, 0, "guardian self-retry warning must not trigger repair");
   });
+
+  it("repair flow no longer injects /gsd stop", async () => {
+    const { startRepairFlow } = await import("../src/repair-flow.js");
+
+    resetRecoveryState();
+
+    const sendUserMessage = mock.fn(() => {});
+    const pi = { sendUserMessage };
+    const ctx = { ui: { notify: () => {} } };
+
+    await startRepairFlow(pi, ctx, "notification", "synthetic failure");
+
+    const allMessages = sendUserMessage.mock.calls.map((call) => String(call.arguments?.[0] ?? ""));
+    assert.equal(allMessages.some((msg) => msg.trim() === "/gsd stop"), false, "must not emit /gsd stop");
+    assert.equal(allMessages.length >= 1, true, "should still send repair prompt");
+  });
 });

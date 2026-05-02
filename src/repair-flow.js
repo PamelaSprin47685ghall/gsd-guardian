@@ -42,7 +42,6 @@ export async function startRepairFlow(pi, ctx, source, message) {
     : "🔥 [Guardian] Auto-mode paused. Starting repair...";
   ctx?.ui?.notify?.(startText, "error");
 
-  queueUserMessage(pi, "/gsd stop", "steer");
   queueUserMessage(pi, buildRepairPrompt(source, message), "followUp");
 
   return true;
