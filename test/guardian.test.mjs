@@ -545,4 +545,29 @@ describe("notification-listener warning handling", () => {
 
     assert.equal(sendUserMessage.mock.calls.length, 0, "user cancellation warning should not trigger repair");
   });
+
+  it("ignores guardian self-generated retry warning text", async () => {
+    const { setupNotificationListener } = await import("../src/notification-listener.js");
+
+    const sendUserMessage = mock.fn(() => {});
+    const notify = mock.fn(() => {});
+    const pi = {
+      on: (event, handler) => {
+        if (event === "notification") {
+          setTimeout(() => handler({
+            severity: "warning",
+            message: "⏳ Retry 1/10 in 1.0s (Esc=cancel)",
+            id: "test-warning-guardian-retry",
+          }), 10);
+        }
+      },
+      sendUserMessage,
+      ui: { notify },
+    };
+
+    setupNotificationListener(pi);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    assert.equal(sendUserMessage.mock.calls.length, 0, "guardian self-retry warning must not trigger repair");
+  });
 });

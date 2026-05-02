@@ -84,7 +84,11 @@ export function createAgentEndHandler(pi) {
       }
 
       ctx.ui.notify(`❌ [Guardian] Repair turn ${state.repairCount}/${REPAIR_MAX} failed.`, "warning");
-      pi.sendUserMessage(formatRepairFailure(errorText));
+      try {
+        pi.sendUserMessage(formatRepairFailure(errorText), { deliverAs: "followUp" });
+      } catch {
+        pi.sendUserMessage(formatRepairFailure(errorText));
+      }
       return;
     }
 
@@ -111,7 +115,11 @@ export function createAgentEndHandler(pi) {
       }
 
       ctx.ui.notify(`🚀 Retry ${state.retryCount}...`, "info");
-      pi.sendUserMessage(formatRetryPrompt(errorText));
+      try {
+        pi.sendUserMessage(formatRetryPrompt(errorText), { deliverAs: "followUp" });
+      } catch {
+        pi.sendUserMessage(formatRetryPrompt(errorText));
+      }
       return;
     }
 

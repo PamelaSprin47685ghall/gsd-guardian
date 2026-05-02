@@ -21,6 +21,14 @@ function buildRepairPrompt(source, message) {
   ].join("\n");
 }
 
+function queueUserMessage(pi, content, deliverAs = "followUp") {
+  try {
+    pi.sendUserMessage(content, { deliverAs });
+  } catch {
+    pi.sendUserMessage(content);
+  }
+}
+
 export async function startRepairFlow(pi, ctx, source, message) {
   if (state.isFixing) return false;
 
@@ -34,8 +42,8 @@ export async function startRepairFlow(pi, ctx, source, message) {
     : "🔥 [Guardian] Auto-mode paused. Starting repair...";
   ctx?.ui?.notify?.(startText, "error");
 
-  pi.sendUserMessage("/gsd stop");
-  pi.sendUserMessage(buildRepairPrompt(source, message));
+  queueUserMessage(pi, "/gsd stop", "steer");
+  queueUserMessage(pi, buildRepairPrompt(source, message), "followUp");
 
   return true;
 }
@@ -54,7 +62,7 @@ export async function finishRepairFlow(pi, ctx) {
   }
 
   ctx.ui.notify("▶️ [Guardian] Auto-mode resumed.", "success");
-  pi.sendUserMessage("/gsd auto");
+  queueUserMessage(pi, "/gsd auto", "followUp");
 }
 
 export function formatRepairFailure(errorText) {

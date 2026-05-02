@@ -13,6 +13,15 @@ const WARNING_IGNORE_PATTERNS = [
   /^operation aborted$/i,
   /^request was aborted$/i,
   /^request aborted by user$/i,
+  /^⏳\s*retry\b/i,
+  /^🚀\s*retry\b/i,
+  /^⚠️\s*\[guardian\]\s*error:/i,
+  /^🔥\s*\[guardian\]/i,
+  /^✅\s*\[guardian\]/i,
+  /^▶️\s*\[guardian\]/i,
+  /^💀\s*\[guardian\]/i,
+  /^🛑\s*\[guardian\]/i,
+  /^ℹ️\s*\[guardian\]/i,
 ];
 
 function getNotificationLevel(entry) {
