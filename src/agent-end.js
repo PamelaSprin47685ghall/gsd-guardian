@@ -62,6 +62,11 @@ export function createAgentEndHandler(pi) {
     }
 
     const isAuto = await isAutoModeRunning();
+    if (!isAuto) {
+      resetRecoveryState();
+      state.lastAutoMode = false;
+      return;
+    }
     if (state.lastAutoMode !== null && state.lastAutoMode !== isAuto) {
       resetRecoveryState();
     }
@@ -178,6 +183,11 @@ export function createAgentEndHandler(pi) {
       return;
 
     const isAuto = await isAutoModeRunning();
+    if (!isAuto) {
+      resetRecoveryState();
+      state.lastAutoMode = false;
+      return;
+    }
     if (state.lastAutoMode !== null && state.lastAutoMode !== isAuto) {
       resetRecoveryState();
     }
