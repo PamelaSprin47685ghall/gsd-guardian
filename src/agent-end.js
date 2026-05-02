@@ -6,10 +6,10 @@ import { extractText } from "./extract-text.js";
 import { isUserCancellation } from "./user-cancellation.js";
 import { shouldRecover } from "./should-recover.js";
 
-const RETRY_MAX = 10;
-const REPAIR_MAX = 5;
-const BACKOFF_MS = 1000;
-const BACKOFF_MAX_MS = 30000;
+const RETRY_MAX = Number(process.env.GUARDIAN_RETRY_MAX) || 10;
+const REPAIR_MAX = Number(process.env.GUARDIAN_REPAIR_MAX) || 5;
+const BACKOFF_MS = Number(process.env.GUARDIAN_BACKOFF_MS) || 1000;
+const BACKOFF_MAX_MS = Number(process.env.GUARDIAN_BACKOFF_MAX_MS) || 30000;
 
 function formatError(text) {
   return `\`\`\`\n${text}\n\`\`\``;
@@ -21,25 +21,25 @@ function getErrorText(lastMsg, event) {
     lastMsg?.content,
     lastMsg?.message,
   ];
-  
+
   for (const candidate of candidates) {
     const text = extractText(candidate);
     if (text) return text;
   }
-  
+
   const anyMsg = event?.messages?.find(m => {
     const text = extractText(m?.errorMessage || m?.content || m?.message);
     return text && text.length > 0;
   });
-  
+
   if (anyMsg) {
     for (const candidate of [anyMsg.errorMessage, anyMsg.content, anyMsg.message]) {
       const text = extractText(candidate);
       if (text) return text;
     }
   }
-  
-  return "Auto-mode stopped";
+
+  return `Auto-mode stopped (stopReason: ${lastMsg?.stopReason || "unknown"}, messageCount: ${event?.messages?.length || 0})`;
 }
 
 const isGsdExtension = (extPath) =>
