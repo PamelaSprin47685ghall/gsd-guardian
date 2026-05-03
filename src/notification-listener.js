@@ -25,6 +25,8 @@ const BENIGN_WARNING_PATTERNS = [
   /^\[[A-Z]\d+\]\s*optional extension tools unavailable/i,
   /^loop (aborted|stopped)/i,
   /^no active loop/i,
+  /^Pre-execution checks failed/i,
+  /^Pre-execution checks error/i,
 ];
 
 const RECOVERABLE_AUTO_PATTERNS = [
