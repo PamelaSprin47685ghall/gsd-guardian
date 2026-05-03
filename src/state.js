@@ -15,6 +15,23 @@ export const state = {
   autoStopRequested: false,
 };
 
+// Reset all session-scoped state so a fresh session starts clean.
+// Prevents stale recovery/repair counters from leaking across sessions.
+export function resetForNewSession() {
+  cancelSleepOnly();
+  state.retryCount = 0;
+  state.repairCount = 0;
+  state.isFixing = false;
+  state.resumeAutoAfterRepair = false;
+  state.repairExhaustedThisTurn = false;
+  state.skipNextAgentEnd = false;
+  state.skippingAgentEndThisTurn = false;
+  state.activeRepairToken = null;
+  state.repairSource = null;
+  state.repairStartedAt = 0;
+  state.autoStopRequested = false;
+}
+
 // Cancel sleep only — does not reset recovery counters.
 // Called by stop hook on user Esc/Ctrl+C.
 export function cancelSleepOnly() {

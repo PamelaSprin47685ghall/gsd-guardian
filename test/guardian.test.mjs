@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { state, sleep, cancelSleepOnly, resetRecoveryState } from "../src/state.js";
+import { state, sleep, cancelSleepOnly, resetRecoveryState, resetForNewSession } from "../src/state.js";
 
 const REPAIR_MAX = 5;
 let _tmpDir = null;
@@ -96,6 +96,22 @@ describe("state machine", () => {
     assert.equal(state.repairCount, 0);
     assert.equal(state.isFixing, false);
     assert.equal(state.repairExhaustedThisTurn, false);
+  });
+
+  it("resetForNewSession cancels in-flight sleep and resets all fields", async () => {
+    state.retryCount = 5;
+    state.isFixing = true;
+    const spyRejecter = mock.fn();
+    state.timer = setTimeout(() => {}, 10000);
+    state.rejecter = spyRejecter;
+
+    resetForNewSession();
+
+    assert.equal(state.retryCount, 0);
+    assert.equal(state.isFixing, false);
+    assert.equal(state.timer, null);
+    assert.equal(state.rejecter, null);
+    assert.equal(spyRejecter.mock.callCount(), 1);
   });
 });
 
@@ -556,7 +572,7 @@ describe("notification-listener warning handling", () => {
         if (event === "notification") {
           setTimeout(() => handler({
             severity: "warning",
-            message: "⏳ Retry 1/10 in 1.0s (Esc=cancel)",
+            message: "[Guardian] Retry 1/10 in 1.0s",
             id: "test-warning-guardian-retry",
           }), 10);
         }

@@ -38,8 +38,8 @@ export async function startRepairFlow(pi, ctx, source, message) {
   beginRepairSession(source);
 
   const startText = source === "watchdog"
-    ? "🔥 [Guardian] Dispatch-stop detected. Starting repair..."
-    : "🔥 [Guardian] Auto-mode paused. Starting repair...";
+    ? "[Guardian] Dispatch-stop detected. Starting repair..."
+    : "[Guardian] Auto-mode paused. Starting repair...";
   ctx?.ui?.notify?.(startText, "error");
 
   queueUserMessage(pi, buildRepairPrompt(source, message), "followUp");
@@ -51,16 +51,16 @@ export async function finishRepairFlow(pi, ctx) {
   const shouldResumeAuto = state.resumeAutoAfterRepair;
   resetRecoveryState();
 
-  ctx.ui.notify("✅ [Guardian] Repair done.", "success");
+  ctx.ui.notify("[Guardian] Repair done.", "success");
   if (!shouldResumeAuto) return;
 
   const isAuto = await isAutoModeRunning();
   if (isAuto) {
-    ctx.ui.notify("ℹ️ [Guardian] Auto-mode already running.", "info");
+    ctx.ui.notify("[Guardian] Auto-mode already running.", "info");
     return;
   }
 
-  ctx.ui.notify("▶️ [Guardian] Auto-mode resumed.", "success");
+  ctx.ui.notify("[Guardian] Auto-mode resumed.", "success");
   queueUserMessage(pi, "/gsd auto", "followUp");
 }
 

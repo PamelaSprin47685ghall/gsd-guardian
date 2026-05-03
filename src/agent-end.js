@@ -11,10 +11,16 @@ import {
   startRepairFlow,
 } from "./repair-flow.js";
 
-const RETRY_MAX = Number(process.env.GUARDIAN_RETRY_MAX) || 10;
-const REPAIR_MAX = Number(process.env.GUARDIAN_REPAIR_MAX) || 5;
-const BACKOFF_MS = Number(process.env.GUARDIAN_BACKOFF_MS) || 1000;
-const BACKOFF_MAX_MS = Number(process.env.GUARDIAN_BACKOFF_MAX_MS) || 30000;
+const parseEnvInt = (name, fallback) => {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : fallback;
+};
+const RETRY_MAX = parseEnvInt("GUARDIAN_RETRY_MAX", 10);
+const REPAIR_MAX = parseEnvInt("GUARDIAN_REPAIR_MAX", 5);
+const BACKOFF_MS = parseEnvInt("GUARDIAN_BACKOFF_MS", 1000);
+const BACKOFF_MAX_MS = parseEnvInt("GUARDIAN_BACKOFF_MAX_MS", 30000);
 
 function getErrorText(lastMsg, event) {
   const candidates = [
@@ -63,7 +69,7 @@ export function createAgentEndHandler(pi) {
 
     if (state.repairExhaustedThisTurn) {
       state.repairExhaustedThisTurn = false;
-      ctx.ui.notify("💀 [Guardian] Repair exhausted. Returning control.", "error");
+      ctx.ui.notify("[Guardian] Repair exhausted. Returning control.", "error");
       return;
     }
 
@@ -78,12 +84,12 @@ export function createAgentEndHandler(pi) {
 
       state.repairCount += 1;
       if (state.repairCount >= REPAIR_MAX) {
-        ctx.ui.notify("💀 [Guardian] Repair failed. Halting.", "error");
+        ctx.ui.notify("[Guardian] Repair failed. Halting.", "error");
         resetRecoveryState();
         return;
       }
 
-      ctx.ui.notify(`❌ [Guardian] Repair turn ${state.repairCount}/${REPAIR_MAX} failed.`, "warning");
+      ctx.ui.notify(`[Guardian] Repair turn ${state.repairCount}/${REPAIR_MAX} failed.`, "warning");
       try {
         pi.sendUserMessage(formatRepairFailure(errorText), { deliverAs: "followUp" });
       } catch {
@@ -101,20 +107,20 @@ export function createAgentEndHandler(pi) {
     if (state.retryCount <= RETRY_MAX) {
       const delayMs = Math.min(BACKOFF_MS * Math.pow(2, state.retryCount - 1), BACKOFF_MAX_MS);
 
-      ctx.ui.notify(`⚠️ [Guardian] Error: ${errorText.slice(0, 150)}...`, "error");
+      ctx.ui.notify(`[Guardian] Error: ${errorText.slice(0, 150)}...`, "error");
       ctx.ui.notify(
-        `⏳ Retry ${state.retryCount}/${RETRY_MAX} in ${(delayMs / 1000).toFixed(1)}s (Esc=cancel)`,
+        `[Guardian] Retry ${state.retryCount}/${RETRY_MAX} in ${(delayMs / 1000).toFixed(1)}s`,
         "warning",
       );
 
       try {
         await sleep(delayMs);
       } catch {
-        ctx.ui.notify("🛑 [Guardian] Retry cancelled.", "warning");
+        ctx.ui.notify("[Guardian] Retry cancelled.", "warning");
         return;
       }
 
-      ctx.ui.notify(`🚀 Retry ${state.retryCount}...`, "info");
+      ctx.ui.notify(`[Guardian] Retry ${state.retryCount}...`, "info");
       try {
         pi.sendUserMessage(formatRetryPrompt(errorText), { deliverAs: "followUp" });
       } catch {
@@ -125,7 +131,7 @@ export function createAgentEndHandler(pi) {
 
     const isAuto = await isAutoModeRunning();
     if (!isAuto) {
-      ctx.ui.notify("💀 [Guardian] Manual retry budget exhausted.", "error");
+      ctx.ui.notify("[Guardian] Manual retry budget exhausted.", "error");
       resetRecoveryState();
       return;
     }

@@ -2,15 +2,12 @@ import { extractText } from "./extract-text.js";
 import { findModule } from "./util.js";
 import { startRepairFlow } from "./repair-flow.js";
 
-const GLOBAL_STATE_KEY = Symbol.for("gsd-guardian.notification-listener");
-const listenerState = globalThis[GLOBAL_STATE_KEY] ??= {
-  unsubscribe: null,
-  lastNotificationId: null,
-  listenerReady: false,
-  initPromise: null,
-  registeredEventApis: new WeakSet(),
-  pi: null,
-};
+let unsubscribe = null;
+let lastNotificationId = null;
+let listenerReady = false;
+let initPromise = null;
+const registeredEventApis = new WeakSet();
+let piRef = null;
 
 const BENIGN_WARNING_PATTERNS = [
   /unknown\s+auto-loop\s+phase/i,
@@ -18,15 +15,7 @@ const BENIGN_WARNING_PATTERNS = [
   /^operation aborted$/i,
   /^request was aborted$/i,
   /^request aborted by user$/i,
-  /^⏳\s*retry\b/i,
-  /^🚀\s*retry\b/i,
-  /^⚠️\s*\[guardian\]\s*error:/i,
-  /^🔥\s*\[guardian\]/i,
-  /^✅\s*\[guardian\]/i,
-  /^▶️\s*\[guardian\]/i,
-  /^💀\s*\[guardian\]/i,
-  /^🛑\s*\[guardian\]/i,
-  /^ℹ️\s*\[guardian\]/i,
+  /^\[Guardian\]\s*(retry|repair|auto|watchdog|dispatch)/i,
   /^magic-todo:/i,
   /^pruner:/i,
   /^\[dag\]\s*dispatch registry synchronized\.?$/i,
@@ -76,8 +65,8 @@ export function shouldRecoverFromNotification(entry, message) {
 
 async function processNotification(pi, entry) {
   if (!entry) return;
-  if (entry.id && entry.id === listenerState.lastNotificationId) return;
-  if (entry.id) listenerState.lastNotificationId = entry.id;
+  if (entry.id && entry.id === lastNotificationId) return;
+  if (entry.id) lastNotificationId = entry.id;
 
   const candidates = [entry.errorMessage, entry.content, entry.message, entry.text];
   let message = "";
@@ -99,39 +88,52 @@ async function loadStoreModule() {
 }
 
 async function initStoreListener(pi) {
-  if (listenerState.listenerReady) return true;
-  if (listenerState.initPromise) return listenerState.initPromise;
+  if (listenerReady) return true;
+  if (initPromise) return initPromise;
 
-  listenerState.initPromise = (async () => {
+  initPromise = (async () => {
     const store = await loadStoreModule();
     if (!store) return false;
 
     const current = store.readNotifications();
-    listenerState.lastNotificationId = current?.[0]?.id ?? listenerState.lastNotificationId;
+    lastNotificationId = current?.[0]?.id ?? lastNotificationId;
 
-    listenerState.unsubscribe?.();
-    listenerState.unsubscribe = store.onNotificationStoreChange(() => {
+    if (unsubscribe) {
+      unsubscribe();
+      unsubscribe = null;
+    }
+    unsubscribe = store.onNotificationStoreChange(() => {
       const latest = store.readNotifications()?.[0];
-      processNotification(listenerState.pi ?? pi, latest).catch(err => {
+      processNotification(piRef ?? pi, latest).catch(err => {
         console.error("[Guardian] notification error:", err);
       });
     });
-    listenerState.listenerReady = true;
+    listenerReady = true;
     return true;
   })();
 
-  return listenerState.initPromise;
+  return initPromise;
+}
+
+export function resetNotificationState() {
+  if (unsubscribe) {
+    try { unsubscribe(); } catch {}
+    unsubscribe = null;
+  }
+  lastNotificationId = null;
+  listenerReady = false;
+  initPromise = null;
 }
 
 export function setupNotificationListener(pi) {
-  listenerState.pi = pi;
-  if (!listenerState.registeredEventApis.has(pi)) {
+  piRef = pi;
+  if (!registeredEventApis.has(pi)) {
     pi.on?.("notification", event => {
       processNotification(pi, event).catch(err => {
         console.error("[Guardian] notification handler error:", err);
       });
     });
-    listenerState.registeredEventApis.add(pi);
+    registeredEventApis.add(pi);
   }
 
   pi.on?.("session_start", () => {
