@@ -10,7 +10,7 @@ let agentStarted = false;
  * Start watchdog: if auto-mode is running but no agent starts within timeout,
  * check for dispatch-stop and trigger repair.
  */
-export function startWatchdog(pi, ctx, basePath, timeoutMs = 3000) {
+export function startWatchdog(pi, ctx, basePath, timeoutMs = 8000) {
   stopWatchdog();
 
   agentStarted = false;
