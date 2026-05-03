@@ -1,16 +1,16 @@
-import { isAutoModeRunning } from "./probe.js";
-import { getLastDispatchStopReason } from "./journal-reader.js";
-import { getState } from "./state.js";
-import { startRepairFlow } from "./repair-flow.js";
+import { isAutoModeRunning } from './probe.js'
+import { getLastDispatchStopReason } from './journal-reader.js'
+import { getState } from './state.js'
+import { startRepairFlow } from './repair-flow.js'
 
 // Per-session watchdog state using WeakMap
-const sessionWatchdogs = new WeakMap();
+const sessionWatchdogs = new WeakMap()
 
 function getWatchdogState(pi) {
   if (!sessionWatchdogs.has(pi)) {
-    sessionWatchdogs.set(pi, { timer: null, agentStarted: false });
+    sessionWatchdogs.set(pi, { timer: null, agentStarted: false })
   }
-  return sessionWatchdogs.get(pi);
+  return sessionWatchdogs.get(pi)
 }
 
 /**
@@ -18,37 +18,43 @@ function getWatchdogState(pi) {
  * check for dispatch-stop and trigger repair.
  */
 export function startWatchdog(pi, ctx, basePath, timeoutMs = 8000) {
-  const state = getWatchdogState(pi);
+  const state = getWatchdogState(pi)
 
   if (state.timer) {
-    clearTimeout(state.timer);
-    state.timer = null;
+    clearTimeout(state.timer)
+    state.timer = null
   }
 
-  state.agentStarted = false;
+  state.agentStarted = false
 
   state.timer = setTimeout(async () => {
-    state.timer = null;
-    if (state.agentStarted) return;
+    state.timer = null
+    if (state.agentStarted) return
 
-    const isAuto = await isAutoModeRunning();
-    if (!isAuto) return;
+    const isAuto = await isAutoModeRunning()
+    if (!isAuto) return
 
-    const currentState = getState(pi);
-    if (currentState.isFixing) return;
+    const currentState = getState(pi)
+    if (currentState.isFixing) return
 
-    const reason = getLastDispatchStopReason(basePath);
-    if (!reason) return;
+    const reason = getLastDispatchStopReason(basePath)
+    if (!reason) return
 
-    await startRepairFlow(pi, ctx, "watchdog", reason);
-  }, timeoutMs);
+    await startRepairFlow(pi, ctx, 'watchdog', reason)
+  }, timeoutMs)
 }
 
 /**
  * Stop watchdog timer.
  */
-export function stopWatchdog() {
-  // No-op for now — session-specific cleanup handled by WeakMap GC
+export function stopWatchdog(pi) {
+  if (!pi) return
+  const state = getWatchdogState(pi)
+  if (state.timer) {
+    clearTimeout(state.timer)
+    state.timer = null
+  }
+  state.agentStarted = false
 }
 
 /**
@@ -57,7 +63,7 @@ export function stopWatchdog() {
  */
 export function markAgentStarted(pi) {
   if (pi) {
-    const state = getWatchdogState(pi);
-    state.agentStarted = true;
+    const state = getWatchdogState(pi)
+    state.agentStarted = true
   }
 }
