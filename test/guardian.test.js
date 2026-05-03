@@ -3,15 +3,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { state, sleep, cancelSleepOnly, resetRecoveryState, resetForNewSession } from "../src/state.js";
+import { getState, sleep, cancelSleepOnly, resetRecoveryState, resetForNewSession } from "../src/state.js";
 
 const REPAIR_MAX = 5;
 let _tmpDir = null;
 
 // ── Temp GSD auto.js helpers ─────────────────────────────────────────────
-// agent-end.js calls isAutoModeRunning() which probes for GSD's auto.js.
-// We create a minimal auto.js in a temp directory so probe finds it.
-
 function setupTempAuto() {
   _tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "guardian-test-"));
   const gsdDir = path.join(_tmpDir, "extensions", "gsd");
@@ -20,8 +17,7 @@ function setupTempAuto() {
     path.join(gsdDir, "auto.js"),
     `export function getAutoDashboardData() {
   return { active: true, stepMode: false, paused: false };
-}
-`,
+}\n`,
   );
   process.env.GSD_CODING_AGENT_DIR = _tmpDir;
 }
@@ -45,72 +41,80 @@ async function createHandlerCtx() {
   const mod = await importFresh("../src/agent-end.js");
   const absorb = mock.fn((_fn) => {});
   const notify = mock.fn(() => {});
-  const handler = mod.createAgentEndHandler({ on: () => {} });
-  return { handler, ctx: { absorb, ui: { notify } } };
+  const pi = { on: () => {}, sendUserMessage: mock.fn(() => {}) };
+  const handler = mod.createAgentEndHandler(pi);
+  return { handler, ctx: { absorb, ui: { notify } }, pi, mod };
 }
 
 // ── State machine ────────────────────────────────────────────────────────
 describe("state machine", () => {
+  const mockPi = {};
+
   it("starts with default values", () => {
-    assert.equal(state.retryCount, 0);
-    assert.equal(state.repairCount, 0);
-    assert.equal(state.isFixing, false);
-    assert.equal(state.repairExhaustedThisTurn, false);
-    assert.equal(state.timer, null);
-    assert.equal(state.rejecter, null);
+    const s = getState(mockPi);
+    assert.equal(s.retryCount, 0);
+    assert.equal(s.repairCount, 0);
+    assert.equal(s.isFixing, false);
+    assert.equal(s.repairExhaustedThisTurn, false);
+    assert.equal(s.timer, null);
+    assert.equal(s.rejecter, null);
   });
 
   it("sleep resolves after ms", async () => {
     const start = Date.now();
-    await sleep(10);
+    await sleep(mockPi, 10);
     assert.ok(Date.now() - start >= 8);
-    assert.equal(state.timer, null);
-    assert.equal(state.rejecter, null);
+    const s = getState(mockPi);
+    assert.equal(s.timer, null);
+    assert.equal(s.rejecter, null);
   });
 
   it("cancelSleepOnly rejects sleep promise without resetting counters", async () => {
-    state.retryCount = 5;
-    state.repairCount = 3;
-    state.isFixing = true;
+    const s = getState(mockPi);
+    s.retryCount = 5;
+    s.repairCount = 3;
+    s.isFixing = true;
 
-    const p = sleep(5000);
-    cancelSleepOnly();
+    const p = sleep(mockPi, 5000);
+    cancelSleepOnly(mockPi);
     await assert.rejects(p, /User Aborted/);
 
-    assert.equal(state.retryCount, 5);
-    assert.equal(state.repairCount, 3);
-    assert.equal(state.isFixing, true);
+    assert.equal(s.retryCount, 5);
+    assert.equal(s.repairCount, 3);
+    assert.equal(s.isFixing, true);
 
-    resetRecoveryState();
+    resetRecoveryState(mockPi);
   });
 
   it("resetRecoveryState clears all recovery fields", () => {
-    state.retryCount = 5;
-    state.repairCount = 3;
-    state.isFixing = true;
-    state.repairExhaustedThisTurn = true;
+    const s = getState(mockPi);
+    s.retryCount = 5;
+    s.repairCount = 3;
+    s.isFixing = true;
+    s.repairExhaustedThisTurn = true;
 
-    resetRecoveryState();
+    resetRecoveryState(mockPi);
 
-    assert.equal(state.retryCount, 0);
-    assert.equal(state.repairCount, 0);
-    assert.equal(state.isFixing, false);
-    assert.equal(state.repairExhaustedThisTurn, false);
+    assert.equal(s.retryCount, 0);
+    assert.equal(s.repairCount, 0);
+    assert.equal(s.isFixing, false);
+    assert.equal(s.repairExhaustedThisTurn, false);
   });
 
   it("resetForNewSession cancels in-flight sleep and resets all fields", async () => {
-    state.retryCount = 5;
-    state.isFixing = true;
+    const s = getState(mockPi);
+    s.retryCount = 5;
+    s.isFixing = true;
     const spyRejecter = mock.fn();
-    state.timer = setTimeout(() => {}, 10000);
-    state.rejecter = spyRejecter;
+    s.timer = setTimeout(() => {}, 10000);
+    s.rejecter = spyRejecter;
 
-    resetForNewSession();
+    resetForNewSession(mockPi);
 
-    assert.equal(state.retryCount, 0);
-    assert.equal(state.isFixing, false);
-    assert.equal(state.timer, null);
-    assert.equal(state.rejecter, null);
+    assert.equal(s.retryCount, 0);
+    assert.equal(s.isFixing, false);
+    assert.equal(s.timer, null);
+    assert.equal(s.rejecter, null);
     assert.equal(spyRejecter.mock.callCount(), 1);
   });
 });
@@ -133,28 +137,25 @@ describe("agent-end repair completion semantics", () => {
   after(() => teardownTempAuto());
 
   it("does NOT announce resumed or send /gsd auto when auto is already active", async () => {
-    const mod = await importFresh("../src/agent-end.js");
-    const sendUserMessage = mock.fn(() => {});
-    const notify = mock.fn(() => {});
-    const handler = mod.createAgentEndHandler({ on: () => {}, sendUserMessage });
-
-    resetRecoveryState();
-    state.isFixing = true;
-    state.resumeAutoAfterRepair = true;
+    const { handler, ctx, pi } = await createHandlerCtx();
+    const s = getState(pi);
+    resetRecoveryState(pi);
+    s.isFixing = true;
+    s.resumeAutoAfterRepair = true;
 
     await handler(
       { messages: [{ role: "assistant", stopReason: "stop" }] },
-      { ui: { notify } },
+      { ui: { notify: ctx.ui.notify } },
     );
 
-    const notifications = notify.mock.calls.map((call) => String(call.arguments?.[0] ?? ""));
+    const notifications = ctx.ui.notify.mock.calls.map((call) => String(call.arguments?.[0] ?? ""));
     assert.ok(notifications.some((line) => line.includes("Repair done")), "must report repair completion");
     assert.equal(
       notifications.some((line) => line.includes("Auto-mode resumed")),
       false,
       "must not claim resumed when auto is already running",
     );
-    assert.equal(sendUserMessage.mock.calls.length, 0, "must not send /gsd auto when already active");
+    assert.equal(pi.sendUserMessage.mock.calls.length, 0, "must not send /gsd auto when already active");
   });
 });
 
@@ -164,8 +165,8 @@ describe("agent-end negotiate — absorb decisions", () => {
   after(() => teardownTempAuto());
 
   it("does NOT absorb on success when not recovering", async () => {
-    const { handler, ctx } = await createHandlerCtx();
-    resetRecoveryState();
+    const { handler, ctx, pi } = await createHandlerCtx();
+    resetRecoveryState(pi);
 
     await handler.negotiate(
       { messages: [{ role: "assistant", stopReason: "stop" }] },
@@ -176,9 +177,9 @@ describe("agent-end negotiate — absorb decisions", () => {
   });
 
   it("clears state on success when recovering", async () => {
-    const { handler, ctx } = await createHandlerCtx();
-    resetRecoveryState();
-    state.retryCount = 3;
+    const { handler, ctx, pi } = await createHandlerCtx();
+    resetRecoveryState(pi);
+    getState(pi).retryCount = 3;
 
     await handler.negotiate(
       { messages: [{ role: "assistant", stopReason: "stop" }] },
@@ -186,14 +187,14 @@ describe("agent-end negotiate — absorb decisions", () => {
     );
 
     assert.equal(ctx.absorb.mock.calls.length, 0);
-    assert.equal(state.retryCount, 0, "retryCount should be reset");
+    assert.equal(getState(pi).retryCount, 0, "retryCount should be reset");
   });
 
   it("does NOT absorb successful turns while fixing", async () => {
-    const { handler, ctx } = await createHandlerCtx();
-    resetRecoveryState();
-    state.isFixing = true;
-    state.resumeAutoAfterRepair = true;
+    const { handler, ctx, pi } = await createHandlerCtx();
+    resetRecoveryState(pi);
+    getState(pi).isFixing = true;
+    getState(pi).resumeAutoAfterRepair = true;
 
     await handler.negotiate(
       { messages: [{ role: "assistant", stopReason: "stop" }] },
@@ -204,10 +205,10 @@ describe("agent-end negotiate — absorb decisions", () => {
   });
 
   it("resets state on repair exhaustion and does NOT absorb", async () => {
-    const { handler, ctx } = await createHandlerCtx();
-    resetRecoveryState();
-    state.isFixing = true;
-    state.repairCount = REPAIR_MAX - 1;
+    const { handler, ctx, pi } = await createHandlerCtx();
+    resetRecoveryState(pi);
+    getState(pi).isFixing = true;
+    getState(pi).repairCount = REPAIR_MAX - 1;
 
     await handler.negotiate(
       {
@@ -219,17 +220,17 @@ describe("agent-end negotiate — absorb decisions", () => {
     );
 
     assert.equal(ctx.absorb.mock.calls.length, 0);
-    assert.equal(state.repairExhaustedThisTurn, true);
-    assert.equal(state.isFixing, false, "isFixing reset in negotiate");
-    assert.equal(state.repairCount, 0, "repairCount reset");
-    assert.equal(state.retryCount, 0, "retryCount reset");
+    assert.equal(getState(pi).repairExhaustedThisTurn, true);
+    assert.equal(getState(pi).isFixing, false, "isFixing reset in negotiate");
+    assert.equal(getState(pi).repairCount, 0, "repairCount reset");
+    assert.equal(getState(pi).retryCount, 0, "retryCount reset");
   });
 
   it("absorbs on error during repair when not exhausted", async () => {
-    const { handler, ctx } = await createHandlerCtx();
-    resetRecoveryState();
-    state.isFixing = true;
-    state.repairCount = 2;
+    const { handler, ctx, pi } = await createHandlerCtx();
+    resetRecoveryState(pi);
+    getState(pi).isFixing = true;
+    getState(pi).repairCount = 2;
 
     await handler.negotiate(
       {
@@ -241,12 +242,12 @@ describe("agent-end negotiate — absorb decisions", () => {
     );
 
     assert.equal(ctx.absorb.mock.calls.length, 1);
-    assert.equal(state.repairCount, 3);
+    assert.equal(getState(pi).repairCount, 3);
   });
 
   it("absorbs on error during retry phase (not fixing)", async () => {
-    const { handler, ctx } = await createHandlerCtx();
-    resetRecoveryState();
+    const { handler, ctx, pi } = await createHandlerCtx();
+    resetRecoveryState(pi);
 
     await handler.negotiate(
       {
@@ -268,15 +269,16 @@ describe("agent-end handler — repair exhausted flag consumption", () => {
 
   it("consumes repairExhaustedThisTurn before guardAutoMode", async () => {
     const mod = await importFresh("../src/agent-end.js");
-    const handler = mod.createAgentEndHandler({ on: () => {} });
-    state.repairExhaustedThisTurn = true;
+    const pi = { on: () => {} };
+    const handler = mod.createAgentEndHandler(pi);
+    getState(pi).repairExhaustedThisTurn = true;
 
     await handler(
       { messages: [{ role: "assistant", stopReason: "error" }] },
       { ui: { notify: () => {} } },
     );
 
-    assert.equal(state.repairExhaustedThisTurn, false);
+    assert.equal(getState(pi).repairExhaustedThisTurn, false);
   });
 });
 
@@ -307,9 +309,9 @@ describe("agent-end mode switch", () => {
   after(() => teardownTempAuto());
 
   it("retries current-turn manual errors", async () => {
-    const { handler, ctx } = await createHandlerCtx();
-    resetRecoveryState();
-    state.lastAutoMode = false;
+    const { handler, ctx, pi } = await createHandlerCtx();
+    resetRecoveryState(pi);
+    getState(pi).lastAutoMode = false;
 
     await handler.negotiate(
       { messages: [{ role: "assistant", stopReason: "error", errorMessage: "test" }] },
@@ -318,26 +320,22 @@ describe("agent-end mode switch", () => {
 
     assert.equal(ctx.absorb.mock.calls.length, 1, "current-turn manual errors should be retried");
 
-    const sendUserMessage = mock.fn(() => {});
-    const manualHandler = (await importFresh("../src/agent-end.js")).createAgentEndHandler({
-      on: () => {},
-      sendUserMessage,
-    });
+    const manualHandler = (await importFresh("../src/agent-end.js")).createAgentEndHandler(pi);
 
     await manualHandler(
       { messages: [{ role: "assistant", stopReason: "error", errorMessage: "test" }] },
       { ui: { notify: () => {} } },
     );
 
-    assert.equal(sendUserMessage.mock.calls.length, 1, "manual errors should issue retry prompt");
+    assert.equal(pi.sendUserMessage.mock.calls.length, 1, "manual errors should issue retry prompt");
   });
 
   it("skips stale agent_end during session switch", async () => {
     const mod = await importFresh("../src/agent-end.js");
-    const { handler, ctx } = await createHandlerCtx();
-    resetRecoveryState();
+    const { handler, ctx, pi } = await createHandlerCtx();
+    resetRecoveryState(pi);
 
-    mod.markNextAgentEndAsSessionSwitch();
+    mod.markNextAgentEndAsSessionSwitch(pi);
 
     await handler.negotiate(
       { messages: [{ role: "assistant", stopReason: "error", errorMessage: "old error" }] },
@@ -346,14 +344,12 @@ describe("agent-end mode switch", () => {
 
     assert.equal(ctx.absorb.mock.calls.length, 1, "stale switch-turn agent_end should be swallowed");
 
-    const sendUserMessage = mock.fn(() => {});
-    const runHandler = mod.createAgentEndHandler({ on: () => {}, sendUserMessage });
-    await runHandler(
+    await handler(
       { messages: [{ role: "assistant", stopReason: "error", errorMessage: "old error" }] },
       { ui: { notify: () => {} } },
     );
 
-    assert.equal(sendUserMessage.mock.calls.length, 0, "stale switch-turn agent_end must not trigger retry");
+    assert.equal(pi.sendUserMessage.mock.calls.length, 0, "stale switch-turn agent_end must not trigger retry");
   });
 });
 
@@ -379,7 +375,6 @@ describe("probe", () => {
     const origGSD = process.env.GSD_CODING_AGENT_DIR;
     setupTempAuto();
     try {
-      // Fresh import with temp auto.js
       const url = new URL("../src/probe.js", import.meta.url);
       url.search = `?t=${Date.now()}_probe`;
       const { isAutoModeRunning } = await import(url.href);
@@ -398,8 +393,8 @@ describe("Non-user-cancellation errors", () => {
   after(() => teardownTempAuto());
 
   it("does NOT absorb user cancellation (aborted + empty content)", async () => {
-    const { handler, ctx } = await createHandlerCtx();
-    resetRecoveryState();
+    const { handler, ctx, pi } = await createHandlerCtx();
+    resetRecoveryState(pi);
 
     await handler.negotiate(
       {
@@ -418,10 +413,9 @@ describe("Non-user-cancellation errors", () => {
   });
 
   it("absorbs aborted with error message (not user cancellation)", async () => {
-    const { handler, ctx } = await createHandlerCtx();
-    resetRecoveryState();
+    const { handler, ctx, pi } = await createHandlerCtx();
+    resetRecoveryState(pi);
     
-    // Simulate auto-mode was running
     await handler.negotiate({ messages: [{ role: "assistant", stopReason: "end_turn" }] }, ctx);
 
     await handler.negotiate(
@@ -441,8 +435,8 @@ describe("Non-user-cancellation errors", () => {
   });
 
   it("does NOT absorb 'Operation aborted' (user cancellation)", async () => {
-    const { handler, ctx } = await createHandlerCtx();
-    resetRecoveryState();
+    const { handler, ctx, pi } = await createHandlerCtx();
+    resetRecoveryState(pi);
 
     await handler.negotiate(
       {
@@ -461,8 +455,8 @@ describe("Non-user-cancellation errors", () => {
   });
 
   it("absorbs validation failure (non-normal completion)", async () => {
-    const { handler, ctx } = await createHandlerCtx();
-    resetRecoveryState();
+    const { handler, ctx, pi } = await createHandlerCtx();
+    resetRecoveryState(pi);
 
     await handler.negotiate(
       {
@@ -590,7 +584,8 @@ describe("notification-listener warning handling", () => {
   it("repair flow no longer injects /gsd stop", async () => {
     const { startRepairFlow } = await import("../src/repair-flow.js");
 
-    resetRecoveryState();
+    const mockPi = {};
+    resetRecoveryState(mockPi);
 
     const sendUserMessage = mock.fn(() => {});
     const pi = { sendUserMessage };

@@ -1,4 +1,4 @@
-import { state, sleep, resetRecoveryState } from "./state.js";
+import { getState, sleep, resetRecoveryState } from "./state.js";
 import { isAutoModeRunning } from "./probe.js";
 import { clearLastToolInvocationError } from "./clear-tool-error.js";
 import { extractText } from "./extract-text.js";
@@ -52,12 +52,14 @@ function getErrorText(lastMsg, event) {
 const isGsdExtension = (extPath) =>
   extPath.includes("extensions") && (extPath.includes("/gsd/") || extPath.endsWith("/gsd"));
 
-export function markNextAgentEndAsSessionSwitch() {
-  state.skipNextAgentEnd = true;
+export function markNextAgentEndAsSessionSwitch(pi) {
+  getState(pi).skipNextAgentEnd = true;
 }
 
 export function createAgentEndHandler(pi) {
   const handler = async (event, ctx) => {
+    const state = getState(pi);
+
     if (state.skippingAgentEndThisTurn) {
       state.skippingAgentEndThisTurn = false;
       return;
@@ -69,7 +71,7 @@ export function createAgentEndHandler(pi) {
 
     if (state.repairExhaustedThisTurn) {
       state.repairExhaustedThisTurn = false;
-      ctx.ui.notify("[Guardian] Repair exhausted. Returning control.", "error");
+      ctx.ui?.notify?.("[Guardian] Repair exhausted. Returning control.", "error");
       return;
     }
 
@@ -78,18 +80,18 @@ export function createAgentEndHandler(pi) {
 
     if (state.isFixing) {
       if (!needsRecovery) {
-        await finishRepairFlow(pi, ctx);
+        await finishRepairFlow(pi, ctx, pi);
         return;
       }
 
       state.repairCount += 1;
       if (state.repairCount >= REPAIR_MAX) {
-        ctx.ui.notify("[Guardian] Repair failed. Halting.", "error");
-        resetRecoveryState();
+        ctx.ui?.notify?.("[Guardian] Repair failed. Halting.", "error");
+        resetRecoveryState(pi);
         return;
       }
 
-      ctx.ui.notify(`[Guardian] Repair turn ${state.repairCount}/${REPAIR_MAX} failed.`, "warning");
+      ctx.ui?.notify?.(`[Guardian] Repair turn ${state.repairCount}/${REPAIR_MAX} failed.`, "warning");
       try {
         pi.sendUserMessage(formatRepairFailure(errorText), { deliverAs: "followUp" });
       } catch {
@@ -107,20 +109,20 @@ export function createAgentEndHandler(pi) {
     if (state.retryCount <= RETRY_MAX) {
       const delayMs = Math.min(BACKOFF_MS * Math.pow(2, state.retryCount - 1), BACKOFF_MAX_MS);
 
-      ctx.ui.notify(`[Guardian] Error: ${errorText.slice(0, 150)}...`, "error");
-      ctx.ui.notify(
+      ctx.ui?.notify?.(`[Guardian] Error: ${errorText.slice(0, 150)}...`, "error");
+      ctx.ui?.notify?.(
         `[Guardian] Retry ${state.retryCount}/${RETRY_MAX} in ${(delayMs / 1000).toFixed(1)}s`,
         "warning",
       );
 
       try {
-        await sleep(delayMs);
+        await sleep(pi, delayMs);
       } catch {
-        ctx.ui.notify("[Guardian] Retry cancelled.", "warning");
+        ctx.ui?.notify?.("[Guardian] Retry cancelled.", "warning");
         return;
       }
 
-      ctx.ui.notify(`[Guardian] Retry ${state.retryCount}...`, "info");
+      ctx.ui?.notify?.(`[Guardian] Retry ${state.retryCount}...`, "info");
       try {
         pi.sendUserMessage(formatRetryPrompt(errorText), { deliverAs: "followUp" });
       } catch {
@@ -129,20 +131,16 @@ export function createAgentEndHandler(pi) {
       return;
     }
 
-    const isAuto = await isAutoModeRunning();
-    if (!isAuto) {
-      ctx.ui.notify("[Guardian] Manual retry budget exhausted.", "error");
-      resetRecoveryState();
-      return;
-    }
-
-    await startRepairFlow(pi, ctx, "agent-end", errorText);
+    // Budget exhausted: start repair flow regardless of session type
+    await startRepairFlow(pi, ctx, "agent-end", errorText, pi);
   };
 
   handler.negotiate = async (event, ctx) => {
+    const state = getState(pi);
+
     if (state.skipNextAgentEnd) {
       state.skipNextAgentEnd = false;
-      resetRecoveryState();
+      resetRecoveryState(pi);
       state.skippingAgentEndThisTurn = true;
       ctx.absorb?.(isGsdExtension);
       return;
@@ -158,7 +156,7 @@ export function createAgentEndHandler(pi) {
       if (state.retryCount > 0 || state.isFixing) {
         const cleared = await clearLastToolInvocationError();
         if (!cleared) {
-          ctx.ui.notify?.("[Guardian] Could not clear GSD lastToolInvocationError.", "warning");
+          ctx.ui?.notify?.("[Guardian] Could not clear GSD lastToolInvocationError.", "warning");
         }
       }
       state.retryCount = 0;

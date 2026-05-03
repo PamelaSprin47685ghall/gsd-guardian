@@ -1,6 +1,6 @@
 import { isAutoModeRunning } from "./probe.js";
 import { getLastDispatchStopReason } from "./journal-reader.js";
-import { state } from "./state.js";
+import { getState } from "./state.js";
 import { startRepairFlow } from "./repair-flow.js";
 
 let watchdogTimer = null;
@@ -23,6 +23,7 @@ export function startWatchdog(pi, ctx, basePath, timeoutMs = 8000) {
     const isAuto = await isAutoModeRunning();
     if (!isAuto) return;
 
+    const state = getState(pi);
     if (state.isFixing) return;
 
     const reason = getLastDispatchStopReason(basePath);

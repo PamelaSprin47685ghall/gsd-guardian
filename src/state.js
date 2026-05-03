@@ -1,83 +1,102 @@
-export const state = {
-  retryCount: 0,
-  repairCount: 0,
-  isFixing: false,
-  resumeAutoAfterRepair: false,
-  repairExhaustedThisTurn: false,
-  skipNextAgentEnd: false,
-  skippingAgentEndThisTurn: false,
-  timer: null,
-  rejecter: null,
-  activeRepairToken: null,
-  repairTokenCounter: 0,
-  repairSource: null,
-  repairStartedAt: 0,
-  autoStopRequested: false,
-};
+const sessionStates = new WeakMap();
 
-// Reset all session-scoped state so a fresh session starts clean.
-// Prevents stale recovery/repair counters from leaking across sessions.
-export function resetForNewSession() {
-  cancelSleepOnly();
-  state.retryCount = 0;
-  state.repairCount = 0;
-  state.isFixing = false;
-  state.resumeAutoAfterRepair = false;
-  state.repairExhaustedThisTurn = false;
-  state.skipNextAgentEnd = false;
-  state.skippingAgentEndThisTurn = false;
-  state.activeRepairToken = null;
-  state.repairSource = null;
-  state.repairStartedAt = 0;
-  state.autoStopRequested = false;
+export function getState(pi) {
+  if (!pi) return getFallbackState();
+
+  if (!sessionStates.has(pi)) {
+    sessionStates.set(pi, {
+      retryCount: 0,
+      repairCount: 0,
+      isFixing: false,
+      resumeAutoAfterRepair: false,
+      repairExhaustedThisTurn: false,
+      skipNextAgentEnd: false,
+      skippingAgentEndThisTurn: false,
+      timer: null,
+      rejecter: null,
+      activeRepairToken: null,
+      repairTokenCounter: 0,
+      repairSource: null,
+      repairStartedAt: 0,
+      autoStopRequested: false,
+    });
+  }
+  return sessionStates.get(pi);
 }
 
-// Cancel sleep only — does not reset recovery counters.
-// Called by stop hook on user Esc/Ctrl+C.
-export function cancelSleepOnly() {
-  if (state.timer) clearTimeout(state.timer);
-  if (state.rejecter) state.rejecter(new Error("User Aborted"));
-  state.timer = null;
-  state.rejecter = null;
+let fallbackState = null;
+function getFallbackState() {
+  if (!fallbackState) {
+    fallbackState = {
+      retryCount: 0,
+      repairCount: 0,
+      isFixing: false,
+      resumeAutoAfterRepair: false,
+      repairExhaustedThisTurn: false,
+      skipNextAgentEnd: false,
+      skippingAgentEndThisTurn: false,
+      timer: null,
+      rejecter: null,
+      activeRepairToken: null,
+      repairTokenCounter: 0,
+      repairSource: null,
+      repairStartedAt: 0,
+      autoStopRequested: false,
+    };
+  }
+  return fallbackState;
 }
 
-// Full reset of Guardian recovery state.
-// Called at repair exhaustion (handler consumes repairExhaustedThisTurn).
-// Never called from stop hook — recovery counters must survive normal agent_end cycles.
-export function resetRecoveryState() {
-  state.retryCount = 0;
-  state.repairCount = 0;
-  state.isFixing = false;
-  state.resumeAutoAfterRepair = false;
-  state.repairExhaustedThisTurn = false;
-  state.skipNextAgentEnd = false;
-  state.skippingAgentEndThisTurn = false;
-  state.activeRepairToken = null;
-  state.repairSource = null;
-  state.repairStartedAt = 0;
-  state.autoStopRequested = false;
+export function resetForNewSession(pi) {
+  cancelSleepOnly(pi);
+  resetRecoveryState(pi);
 }
 
-export function beginRepairSession(source) {
-  state.isFixing = true;
-  state.resumeAutoAfterRepair = true;
-  state.retryCount = 0;
-  state.repairCount = 0;
-  state.repairExhaustedThisTurn = false;
-  state.repairTokenCounter += 1;
-  state.activeRepairToken = `repair-${state.repairTokenCounter}`;
-  state.repairSource = source;
-  state.repairStartedAt = Date.now();
-  state.autoStopRequested = true;
-  return state.activeRepairToken;
+export function cancelSleepOnly(pi) {
+  const s = getState(pi);
+  if (s.timer) clearTimeout(s.timer);
+  if (s.rejecter) s.rejecter(new Error("User Aborted"));
+  s.timer = null;
+  s.rejecter = null;
 }
 
-export function sleep(ms) {
+export function resetRecoveryState(pi) {
+  const s = getState(pi);
+  s.retryCount = 0;
+  s.repairCount = 0;
+  s.isFixing = false;
+  s.resumeAutoAfterRepair = false;
+  s.repairExhaustedThisTurn = false;
+  s.skipNextAgentEnd = false;
+  s.skippingAgentEndThisTurn = false;
+  s.activeRepairToken = null;
+  s.repairSource = null;
+  s.repairStartedAt = 0;
+  s.autoStopRequested = false;
+}
+
+export function beginRepairSession(pi, source) {
+  const s = getState(pi);
+  s.isFixing = true;
+  s.resumeAutoAfterRepair = true;
+  s.retryCount = 0;
+  s.repairCount = 0;
+  s.repairExhaustedThisTurn = false;
+  s.repairTokenCounter += 1;
+  s.activeRepairToken = `repair-${s.repairTokenCounter}`;
+  s.repairSource = source;
+  s.repairStartedAt = Date.now();
+  s.autoStopRequested = true;
+  return s.activeRepairToken;
+}
+
+export function sleep(pi, ms) {
+  const s = getState(pi);
   return new Promise((resolve, reject) => {
-    state.rejecter = reject;
-    state.timer = setTimeout(() => {
-      state.timer = null;
-      state.rejecter = null;
+    s.rejecter = reject;
+    s.timer = setTimeout(() => {
+      s.timer = null;
+      s.rejecter = null;
       resolve();
     }, ms);
   });

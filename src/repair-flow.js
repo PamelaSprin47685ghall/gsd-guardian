@@ -1,4 +1,4 @@
-import { beginRepairSession, resetRecoveryState, state } from "./state.js";
+import { beginRepairSession, resetRecoveryState, getState } from "./state.js";
 import { isAutoModeRunning } from "./probe.js";
 
 function formatError(text) {
@@ -30,12 +30,10 @@ function queueUserMessage(pi, content, deliverAs = "followUp") {
 }
 
 export async function startRepairFlow(pi, ctx, source, message) {
+  const state = getState(pi);
   if (state.isFixing) return false;
 
-  const isAuto = await isAutoModeRunning();
-  if (!isAuto) return false;
-
-  beginRepairSession(source);
+  beginRepairSession(pi, source);
 
   const startText = source === "watchdog"
     ? "[Guardian] Dispatch-stop detected. Starting repair..."
@@ -48,19 +46,20 @@ export async function startRepairFlow(pi, ctx, source, message) {
 }
 
 export async function finishRepairFlow(pi, ctx) {
+  const state = getState(pi);
   const shouldResumeAuto = state.resumeAutoAfterRepair;
-  resetRecoveryState();
+  resetRecoveryState(pi);
 
-  ctx.ui.notify("[Guardian] Repair done.", "success");
+  ctx?.ui?.notify?.("[Guardian] Repair done.", "success");
   if (!shouldResumeAuto) return;
 
   const isAuto = await isAutoModeRunning();
   if (isAuto) {
-    ctx.ui.notify("[Guardian] Auto-mode already running.", "info");
+    ctx?.ui?.notify?.("[Guardian] Auto-mode already running.", "info");
     return;
   }
 
-  ctx.ui.notify("[Guardian] Auto-mode resumed.", "success");
+  ctx?.ui?.notify?.("[Guardian] Auto-mode resumed.", "success");
   queueUserMessage(pi, "/gsd auto", "followUp");
 }
 

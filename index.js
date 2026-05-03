@@ -16,12 +16,12 @@ export default function guardianPlugin(pi) {
   setupNotificationListener(pi);
 
   pi.on("session_before_switch", () => {
-    markNextAgentEndAsSessionSwitch();
+    markNextAgentEndAsSessionSwitch(pi);
   });
 
   // Start watchdog when session starts; reset recovery state for fresh session
   pi.on("session_start", (event, ctx) => {
-    resetForNewSession();
+    resetForNewSession(pi);
     const basePath = ctx?.cwd || process.cwd();
     startWatchdog(pi, ctx, basePath);
   });
@@ -35,8 +35,8 @@ export default function guardianPlugin(pi) {
   pi.on("stop", (event) => {
     stopWatchdog();
     if (event?.reason === "cancelled") {
-      cancelSleepOnly();
-      resetForNewSession();
+      cancelSleepOnly(pi);
+      resetForNewSession(pi);
     }
   });
 }
