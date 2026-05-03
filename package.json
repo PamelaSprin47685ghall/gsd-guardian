@@ -1,16 +1,24 @@
 {
   "name": "gsd-guardian",
-  "version": "3.0.0",
-  "description": "Guardian plugin for GSD auto-mode error recovery (absorb-based time freeze)",
+  "version": "5.1.0",
+  "description": "Auto-mode recovery extension for GSD: retries recoverable failures without losing session context.",
   "type": "module",
   "exports": "./index.js",
   "scripts": {
     "test": "node --test test/*.test.mjs"
   },
+  "keywords": [
+    "pi-package",
+    "gsd-extension",
+    "auto-mode",
+    "recovery"
+  ],
   "gsd": {
     "extension": true
   },
   "pi": {
-    "extensions": ["index.js"]
+    "extensions": [
+      "./index.js"
+    ]
   }
 }

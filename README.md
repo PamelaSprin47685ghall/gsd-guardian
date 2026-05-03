@@ -1,41 +1,46 @@
-# GSD Guardian
+# Guardian
 
-**Time-Freeze Auto-Recovery for GSD Auto Mode**
+Guardian recovers selected GSD auto-mode failures without discarding the current session context. It is intentionally conservative: normal sibling-extension warnings are ignored, and only explicit auto-mode, dispatch, validation, missing-tool, or task-execution failures can trigger recovery.
 
-利用 Pi Core 的 `ctx.absorb()` 两阶段事件拦截实现**绝对不丢上下文的原地重试**。
+Version: `5.1.0`.
 
-## 文件结构
+## What it provides
 
-```
-index.js                 # 入口（9 行）
-src/
-  state.js               # 内部状态机：retry/repair 计数、sleep/abort
-  probe.js               # 动态探测 isAutoModeRunning
-  agent-end.js           # agent_end 拦截核心：absorb + 三阶段重试/修复
-  session-hijack.js      # before_agent_start 劫持 newSession 保护上下文
-test/
-  guardian.test.mjs      # 单元测试
-```
-
-## 原理
-
-```
-agent_end (stopReason: "error")
-  → negotiate: ctx.absorb("extensions/gsd")    ← GSD 被没收，autoLoop 挂起
-  → execute:   pi.sendUserMessage(errorText)    ← LLM 在原上下文看到错误
-  → LLM 修复成功 → 不 absorb → GSD 收到正常事件 → 以为是第一次成功
-  → LLM 再错    → 再 absorb → sendUserMessage → 循环
-```
-
-## 行为
-
-| 条件 | 动作 |
+| Capability | Name |
 |---|---|
-| 1–10 次错误 | 指数退避 (1s–30s) 原地重试，Esc 取消 |
-| 10 次耗尽 (auto-mode) | `/gsd pause` → LLM 修复回合 → 自动恢复 |
-| 10 次耗尽 (非 auto) | 放弃 |
-| 修复回合失败 >5 次 | 彻底停止 |
+| Hooks | `agent_end`, `notification`, `session_before_switch`, `session_start`, `before_agent_start`, `stop` |
+| Commands | none |
+| Tools | none |
 
-## 依赖
+## How it works
 
-- Pi Core >=2.29.0（提供 `ctx.absorb()` 两阶段扩展运行器）
+When an agent turn ends with a recoverable error, Guardian can absorb the failure, preserve the current conversation, and ask the agent to repair the problem in place. For repeated failures it applies bounded retry and repair handoff instead of blindly looping forever.
+
+Guardian also watches notification events for explicit failure signals. It does not recover from routine informational or warning messages emitted by other extensions.
+
+## Recovery boundaries
+
+Guardian is meant for recoverable automation failures, such as:
+
+- auto-mode dispatch failures,
+- validation checkpoint failures,
+- missing tool surfaces,
+- explicit DAG or task execution failures.
+
+Guardian is not a general warning handler. It should not react to todo restoration notices, prompt-pruning warnings, loop status messages, or routine DAG progress logs.
+
+## Operational notes
+
+- Recovery state is reset on cancellation.
+- Session-switch boundaries are marked so ordinary navigation does not look like a failed turn.
+- Forked sessions keep the same recovery behavior automatically.
+
+## Maintainer spec
+
+See [`SPEC.md`](./SPEC.md) for recovery, watchdog, retry, and full-suite compatibility rules.
+
+## Test
+
+```bash
+npm test
+```

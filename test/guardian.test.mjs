@@ -470,7 +470,7 @@ describe("notification-listener warning handling", () => {
   before(() => setupTempAuto());
   after(() => teardownTempAuto());
 
-  it("triggers repair on warning notifications in auto-mode", async () => {
+  it("triggers repair on auto-mode validation warning notifications", async () => {
     const { setupNotificationListener } = await import("../src/notification-listener.js");
     
     const sendUserMessage = mock.fn(() => {});
@@ -480,7 +480,7 @@ describe("notification-listener warning handling", () => {
         if (event === "notification") {
           setTimeout(() => handler({ 
             kind: "warning", 
-            content: "Milestone M013 has planned operational verification", 
+            content: "Milestone M013 has planned operational verification but the validation output does not address it.", 
             id: "test-warning-1" 
           }), 10);
         }

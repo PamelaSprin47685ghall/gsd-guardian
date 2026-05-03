@@ -1,9 +1,17 @@
+import { ensureBundledExtensionPath } from "./src/self-injection.js";
 import { createAgentEndHandler, markNextAgentEndAsSessionSwitch } from "./src/agent-end.js";
 import { setupNotificationListener } from "./src/notification-listener.js";
 import { cancelSleepOnly, resetRecoveryState } from "./src/state.js";
 import { startWatchdog, stopWatchdog, markAgentStarted } from "./src/watchdog.js";
 
+ensureBundledExtensionPath(import.meta.url);
+
+const registeredPluginApis = new WeakSet();
+
 export default function guardianPlugin(pi) {
+  if (registeredPluginApis.has(pi)) return;
+  registeredPluginApis.add(pi);
+
   pi.on("agent_end", createAgentEndHandler(pi));
   setupNotificationListener(pi);
 
