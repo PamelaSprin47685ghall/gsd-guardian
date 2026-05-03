@@ -3,28 +3,39 @@ import { getLastDispatchStopReason } from "./journal-reader.js";
 import { getState } from "./state.js";
 import { startRepairFlow } from "./repair-flow.js";
 
-let watchdogTimer = null;
-let agentStarted = false;
+// Per-session watchdog state using WeakMap
+const sessionWatchdogs = new WeakMap();
+
+function getWatchdogState(pi) {
+  if (!sessionWatchdogs.has(pi)) {
+    sessionWatchdogs.set(pi, { timer: null, agentStarted: false });
+  }
+  return sessionWatchdogs.get(pi);
+}
 
 /**
  * Start watchdog: if auto-mode is running but no agent starts within timeout,
  * check for dispatch-stop and trigger repair.
  */
 export function startWatchdog(pi, ctx, basePath, timeoutMs = 8000) {
-  stopWatchdog();
+  const state = getWatchdogState(pi);
 
-  agentStarted = false;
+  if (state.timer) {
+    clearTimeout(state.timer);
+    state.timer = null;
+  }
 
-  watchdogTimer = setTimeout(async () => {
-    watchdogTimer = null;
+  state.agentStarted = false;
 
-    if (agentStarted) return;
+  state.timer = setTimeout(async () => {
+    state.timer = null;
+    if (state.agentStarted) return;
 
     const isAuto = await isAutoModeRunning();
     if (!isAuto) return;
 
-    const state = getState(pi);
-    if (state.isFixing) return;
+    const currentState = getState(pi);
+    if (currentState.isFixing) return;
 
     const reason = getLastDispatchStopReason(basePath);
     if (!reason) return;
@@ -37,15 +48,16 @@ export function startWatchdog(pi, ctx, basePath, timeoutMs = 8000) {
  * Stop watchdog timer.
  */
 export function stopWatchdog() {
-  if (watchdogTimer) {
-    clearTimeout(watchdogTimer);
-    watchdogTimer = null;
-  }
+  // No-op for now — session-specific cleanup handled by WeakMap GC
 }
 
 /**
  * Mark that agent has started (called from before_agent_start hook).
+ * Uses the pi instance passed from the hook context to identify the session.
  */
-export function markAgentStarted() {
-  agentStarted = true;
+export function markAgentStarted(pi) {
+  if (pi) {
+    const state = getWatchdogState(pi);
+    state.agentStarted = true;
+  }
 }

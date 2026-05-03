@@ -2,13 +2,23 @@ import { extractText } from "./extract-text.js";
 import { findModule } from "./util.js";
 import { startRepairFlow } from "./repair-flow.js";
 
-let unsubscribe = null;
-let lastNotificationId = null;
-let listenerReady = false;
-let initPromise = null;
-const registeredEventApis = new WeakSet();
-let piRef = null;
+// Per-session notification state using WeakMap
+const sessionListeners = new WeakMap();
 
+function getListenerState(pi) {
+  if (!sessionListeners.has(pi)) {
+    sessionListeners.set(pi, {
+      unsubscribe: null,
+      lastNotificationId: null,
+      ready: false,
+      initPromise: null,
+      piRef: pi,
+    });
+  }
+  return sessionListeners.get(pi);
+}
+
+const registeredEventApis = new WeakSet();
 const BENIGN_WARNING_PATTERNS = [
   /unknown\s+auto-loop\s+phase/i,
   /unknown\s+.*\s+phase/i,
@@ -67,8 +77,10 @@ export function shouldRecoverFromNotification(entry, message) {
 
 async function processNotification(pi, entry) {
   if (!entry) return;
-  if (entry.id && entry.id === lastNotificationId) return;
-  if (entry.id) lastNotificationId = entry.id;
+
+  const state = getListenerState(pi);
+  if (entry.id && entry.id === state.lastNotificationId) return;
+  if (entry.id) state.lastNotificationId = entry.id;
 
   const candidates = [entry.errorMessage, entry.content, entry.message, entry.text];
   let message = "";
@@ -90,45 +102,41 @@ async function loadStoreModule() {
 }
 
 async function initStoreListener(pi) {
-  if (listenerReady) return true;
-  if (initPromise) return initPromise;
+  const state = getListenerState(pi);
+  if (state.ready) return true;
+  if (state.initPromise) return state.initPromise;
 
-  initPromise = (async () => {
+  state.initPromise = (async () => {
     const store = await loadStoreModule();
     if (!store) return false;
 
     const current = store.readNotifications();
-    lastNotificationId = current?.[0]?.id ?? lastNotificationId;
+    state.lastNotificationId = current?.[0]?.id ?? state.lastNotificationId;
 
-    if (unsubscribe) {
-      unsubscribe();
-      unsubscribe = null;
+    if (state.unsubscribe) {
+      state.unsubscribe();
+      state.unsubscribe = null;
     }
-    unsubscribe = store.onNotificationStoreChange(() => {
+    state.unsubscribe = store.onNotificationStoreChange(() => {
       const latest = store.readNotifications()?.[0];
-      processNotification(piRef ?? pi, latest).catch(err => {
+      processNotification(state.piRef ?? pi, latest).catch(err => {
         console.error("[Guardian] notification error:", err);
       });
     });
-    listenerReady = true;
+    state.ready = true;
     return true;
   })();
 
-  return initPromise;
+  return state.initPromise;
 }
 
 export function resetNotificationState() {
-  if (unsubscribe) {
-    try { unsubscribe(); } catch {}
-    unsubscribe = null;
-  }
-  lastNotificationId = null;
-  listenerReady = false;
-  initPromise = null;
+  // Per-session: state is cleaned up when session is garbage collected
+  // or can be explicitly cleaned via sessionListeners.delete(pi)
 }
 
 export function setupNotificationListener(pi) {
-  piRef = pi;
+  const state = getListenerState(pi);
   if (!registeredEventApis.has(pi)) {
     pi.on?.("notification", event => {
       processNotification(pi, event).catch(err => {

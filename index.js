@@ -28,7 +28,7 @@ export default function guardianPlugin(pi) {
 
   // Mark agent started to stop watchdog
   pi.on("before_agent_start", () => {
-    markAgentStarted();
+    markAgentStarted(pi);
   });
 
   // Stop watchdog on stop
